@@ -1,0 +1,29 @@
+# --- Secrets & local auth (NEVER commit) ---
+.env
+.auth/
+
+# --- Generated output ---
+reports/
+.cache/
+
+# --- Local persistent state (streamer-slot tracking) ---
+.state/
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Workspace harness (local-only, per workspace mandate) ---
+.claude/
+conductor/
+STRATEGY.md
+WORKFLOW.md
+bootstrap.ps1
+mach.exe
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
