@@ -28,6 +28,8 @@ REPORTS_DIR = PROJECT_ROOT / "reports"
 # Local, git-ignored persistent state (streamer-slot tracking, etc.).
 STATE_DIR = PROJECT_ROOT / ".state"
 STREAMERS_FILE = STATE_DIR / "streamers.json"
+# Queued, awaiting-confirmation changes (lineup + add/drops) the poller may apply.
+PENDING_FILE = STATE_DIR / "pending.json"
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -47,6 +49,12 @@ class Settings:
     email_sender: str | None = None
     email_app_password: str | None = None
     email_recipient: str | None = None
+    imap_host: str = "imap.gmail.com"
+    # Address a confirmation reply must come FROM (defaults to the recipient we mailed).
+    confirm_from: str | None = None
+    # If set, the poller auto-applies *only the lineup* once a queue is this many minutes
+    # old with no reply. None (default) means nothing auto-applies -- confirm everything.
+    lineup_fallback_minutes: int | None = None
 
     @property
     def has_cookies(self) -> bool:
@@ -56,6 +64,18 @@ class Settings:
     def email_enabled(self) -> bool:
         return bool(self.email_sender and self.email_app_password and self.email_recipient)
 
+    @property
+    def confirm_enabled(self) -> bool:
+        """Can we read replies? Needs the same mailbox creds plus a sender to trust."""
+        return bool(
+            self.email_sender and self.email_app_password and self.confirm_address
+        )
+
+    @property
+    def confirm_address(self) -> str | None:
+        """The single address whose replies we honour (confirm_from, else recipient)."""
+        return self.confirm_from or self.email_recipient
+
 
 def _require_int(name: str) -> int:
     raw = os.getenv(name, "").strip()
@@ -63,6 +83,17 @@ def _require_int(name: str) -> int:
         raise ConfigError(
             f"Missing required setting {name}. Copy .env.example to .env and fill it in."
         )
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"Setting {name} must be an integer, got {raw!r}.") from exc
+
+
+def _optional_int(name: str) -> int | None:
+    """An int env var that may be blank/absent (returns None), but must parse if present."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return None
     try:
         return int(raw)
     except ValueError as exc:
@@ -116,6 +147,9 @@ def get_settings(require_cookies: bool = False) -> Settings:
         # Gmail shows app passwords in groups of four; the real value has no spaces.
         email_app_password="".join(os.getenv("EMAIL_APP_PASSWORD", "").split()) or None,
         email_recipient=os.getenv("EMAIL_RECIPIENT", "").strip() or None,
+        imap_host=os.getenv("IMAP_HOST", "").strip() or "imap.gmail.com",
+        confirm_from=os.getenv("CONFIRM_FROM", "").strip() or None,
+        lineup_fallback_minutes=_optional_int("LINEUP_FALLBACK_MINUTES"),
     )
 
     if require_cookies and not settings.has_cookies:

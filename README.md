@@ -1,15 +1,17 @@
 # Fantasy Baseball Assistant
 
 Automates the tedious parts of managing an ESPN fantasy baseball team, driven from the
-terminal (and by Claude in chat). It computes the optimal daily lineup and auto-applies
-it, and surfaces streaming-pitcher and waiver-pickup recommendations.
+terminal (and by Claude in chat). Each morning it computes the optimal daily lineup and the
+best streaming/waiver moves, **queues them, and emails you the proposal** — nothing is sent
+to ESPN until you approve it by replying.
 
 - **Lineup optimization** — starts players who actually play today and aren't injured,
   fills the scarcest slots first, benches the rest, parks the injured on the IL.
-  Auto-applied.
 - **Waivers & streaming** — free-agent starters with an upcoming start, and hitters who
-  out-project your weakest bats. **Recommendations only** (ask-first; you confirm before
-  any add/drop).
+  out-project your weakest bats, each paired with the safest drop.
+- **Confirm before execute** — every proposed change (lineup + each add/drop) is a numbered
+  item in the email. You reply `apply all`, `apply 1,3`, or `no`; a poller applies only what
+  you approved and emails back the result. Nothing executes unprompted.
 
 ## How it works
 
@@ -46,10 +48,12 @@ keep it isolated from your personal login.
 
 ```
 config.py          settings + cookie loading        cli.py         on-demand commands
-setup_cookies.py   save ESPN auth cookies           daily_job.py   scheduled morning run
-notify.py          email notifications              pipeline.py    shared orchestration
-espn_client/       ESPN API reader + writer         analysis/      lineup, streaming, waivers
-data/              schedule, team offense, parks    tests/         offline unit tests
+setup_cookies.py   save ESPN auth cookies           daily_job.py   morning run: build + email proposal
+notify.py          email (SMTP) notifications        apply_job.py   poller: read replies + apply
+inbox.py           read/parse confirmation replies   apply.py       execute approved changes
+pending.py         the awaiting-confirmation queue   pipeline.py    shared orchestration
+espn_client/       ESPN API reader + writer          analysis/      lineup, streaming, waivers
+data/              schedule, team offense, parks     tests/         offline unit tests
 ```
 
 ## Setup
@@ -91,13 +95,23 @@ machine, in `.auth/cookies.json` (git-ignored). Re-run when the cookies expire.
 
 ### 5. Email notifications (optional)
 
-The daily job emails a summary (lineup changes + recommendations) from your dedicated
-agent Gmail. In `.env` set `EMAIL_SENDER` (that Gmail), `EMAIL_RECIPIENT` (your inbox), and
-`EMAIL_APP_PASSWORD` — a Gmail **App Password**:
+The daily job emails the proposal from your dedicated agent Gmail. In `.env` set
+`EMAIL_SENDER` (that Gmail), `EMAIL_RECIPIENT` (your inbox), and `EMAIL_APP_PASSWORD` — a
+Gmail **App Password**:
 1. Enable 2-Step Verification on the agent account.
 2. <https://myaccount.google.com/apppasswords> → create one → paste the 16 chars.
 
 Leave blank to disable (the job still runs and writes its report).
+
+### 6. Confirmation replies (optional)
+
+To approve changes by **replying to the email**, the poller reads the agent Gmail over IMAP
+using the *same* app password. Enable IMAP on that account (Gmail → Settings → Forwarding and
+POP/IMAP → Enable IMAP), then in `.env` set `CONFIRM_FROM` to the address you reply from
+(blank = `EMAIL_RECIPIENT`). Only that address is trusted, and each reply must echo the
+queue's token (Gmail keeps it in the quoted subject), so a stale "yes" can't apply a newer
+queue. Optionally set `LINEUP_FALLBACK_MINUTES` to auto-apply *only the lineup* if you don't
+reply in time. Without these, use the `cli.py apply` path below from a computer.
 
 ## Usage
 
@@ -108,13 +122,18 @@ python cli.py lineup            # show optimal moves (dry run — nothing submit
 python cli.py lineup --execute  # apply the moves on ESPN
 python cli.py waivers           # streaming + best-available recommendations
 python cli.py waivers --days 3  # widen the look-ahead window for starts
+
+python cli.py pending           # show queued, awaiting-confirmation changes
+python cli.py apply --all       # apply the whole queue (or --only 1,3) from a computer
+python cli.py poll              # check email for a reply and apply it, once
 ```
 
-Run the scheduled job manually any time:
+Run the scheduled jobs manually any time:
 ```powershell
-python daily_job.py             # auto-set lineup + write reports/YYYY-MM-DD.md
+python daily_job.py             # build the proposal, email it, write reports/YYYY-MM-DD.md
+python apply_job.py             # check for a reply and apply approved changes
 ```
-To schedule it every morning, see [scheduler_setup.md](scheduler_setup.md).
+To schedule both (morning proposal + frequent poller), see [scheduler_setup.md](scheduler_setup.md).
 
 ## Testing
 

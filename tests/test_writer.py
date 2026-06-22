@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from analysis.lineup import LineupPlan, Move
-from espn_client.writer import WriteError, build_lineup_payload
+from espn_client.writer import WriteError, build_add_drop_payload, build_lineup_payload
 
 
 def _plan(moves):
@@ -36,3 +36,21 @@ def test_unknown_slot_raises():
     plan = _plan([Move(1, "Bad", "BE", "ZZ")])
     with pytest.raises(WriteError):
         build_lineup_payload(plan, team_id=3, scoring_period=80, swid="{ABC}")
+
+
+def test_add_drop_payload_shape():
+    payload = build_add_drop_payload(
+        add_id=555, drop_id=222, team_id=3, scoring_period=80, swid="{ABC}"
+    )
+    assert payload["type"] == "FREEAGENT"
+    assert payload["teamId"] == 3
+    assert payload["scoringPeriodId"] == 80
+    assert payload["memberId"] == "{ABC}"
+    assert payload["executionType"] == "EXECUTE"
+    assert payload["bidAmount"] == 0
+
+    by_type = {i["type"]: i for i in payload["items"]}
+    assert by_type["ADD"]["playerId"] == 555
+    assert by_type["ADD"]["toTeamId"] == 3 and by_type["ADD"]["fromTeamId"] == 0
+    assert by_type["DROP"]["playerId"] == 222
+    assert by_type["DROP"]["fromTeamId"] == 3 and by_type["DROP"]["toTeamId"] == 0

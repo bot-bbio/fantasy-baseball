@@ -49,6 +49,31 @@ def _slot_id(slot_name: str) -> int:
     return slot_id
 
 
+def build_add_drop_payload(
+    add_id: int, drop_id: int, team_id: int, scoring_period: int, swid: str
+) -> dict:
+    """Build a FREEAGENT transaction body that adds one player and drops another.
+
+    Same authenticated write host as the lineup change. A free-agent pickup paired with a
+    drop is a single transaction: an ADD item (from the FA pool, team 0, to our team) and a
+    DROP item (from our team to the pool). ``bidAmount`` is 0 for a straight free-agent add.
+    """
+    items = [
+        {"playerId": int(add_id), "type": "ADD", "fromTeamId": 0, "toTeamId": team_id},
+        {"playerId": int(drop_id), "type": "DROP", "fromTeamId": team_id, "toTeamId": 0},
+    ]
+    return {
+        "isLeagueManager": False,
+        "teamId": team_id,
+        "type": "FREEAGENT",
+        "memberId": swid,
+        "scoringPeriodId": scoring_period,
+        "executionType": "EXECUTE",
+        "bidAmount": 0,
+        "items": items,
+    }
+
+
 def build_lineup_payload(
     plan: LineupPlan, team_id: int, scoring_period: int, swid: str
 ) -> dict:
@@ -109,3 +134,36 @@ class LineupWriter:
             ok=ok,
             message=message,
         )
+
+
+class AddDropWriter:
+    """Submits a single add/drop (free-agent pickup paired with a drop) to ESPN.
+
+    Same guardrails as ``LineupWriter``: dry-run is the default (builds the payload, sends
+    nothing). A real add/drop is destructive (the dropped player can be claimed), so callers
+    only run it on explicit confirmation and verify by re-reading the roster afterwards.
+    """
+
+    def __init__(self, settings: config.Settings | None = None):
+        self.settings = settings or config.get_settings(require_cookies=True)
+        if not self.settings.has_cookies:
+            raise WriteError("No ESPN cookies; run `python setup_cookies.py` first.")
+
+    def add_drop(
+        self, add_id: int, drop_id: int, scoring_period: int, *, dry_run: bool = True
+    ) -> WriteResult:
+        payload = build_add_drop_payload(
+            add_id, drop_id, self.settings.team_id, scoring_period, self.settings.swid
+        )
+        if dry_run:
+            return WriteResult(submitted=1, ok=True, message="Dry run: nothing submitted.")
+
+        url = WRITE_URL.format(year=self.settings.year, league_id=self.settings.league_id)
+        cookies = {"espn_s2": self.settings.espn_s2, "SWID": self.settings.swid}
+        response = requests.post(url, json=payload, cookies=cookies, headers=_HEADERS, timeout=20)
+
+        ok = response.status_code in (200, 201)
+        message = "Submitted." if ok else (
+            f"ESPN rejected the add/drop (HTTP {response.status_code}): {response.text[:300]}"
+        )
+        return WriteResult(submitted=1, status_code=response.status_code, ok=ok, message=message)

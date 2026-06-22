@@ -15,6 +15,8 @@ import sys
 from tabulate import tabulate
 from espn_api.requests.espn_requests import ESPNAccessDenied
 
+import apply as apply_mod
+import apply_job
 import config
 import pipeline
 from analysis.lineup import is_probable_today
@@ -22,6 +24,7 @@ from analysis.scoring import compute_category_scores
 from data import mlb_schedule
 from espn_client.reader import LeagueReader
 from models import RosterPlayer, normalize_name
+from pending import LINEUP, PendingQueue, parse_numbers
 from streamer_state import StreamerLog
 
 
@@ -237,6 +240,64 @@ def cmd_streamer(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pending(args: argparse.Namespace) -> int:
+    """Show the queued, awaiting-confirmation changes (no ESPN call)."""
+    queue = PendingQueue.load()
+    if queue is None or queue.is_empty:
+        print("No pending changes queued.")
+        return 0
+    print(f"Queue token: {queue.token}  (created {queue.created})")
+    for item in queue.items:
+        print(f"\n{item.n}. {item.description}")
+        if item.kind == LINEUP:
+            for m in item.payload.get("moves", []):
+                print(f"     {m['name']}: {m['from_slot']} -> {m['to_slot']}")
+    print("\nApply with: python cli.py apply --all   (or --only 1,3)")
+    return 0
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    """Apply queued changes from a computer (the no-phone fallback for `poll`)."""
+    queue = PendingQueue.load()
+    if queue is None or queue.is_empty:
+        print("No pending changes to apply.")
+        return 0
+
+    if args.all:
+        selection: str | set[int] = "all"
+    elif args.only:
+        selection = parse_numbers(args.only)
+    else:
+        print("Specify --all or --only N[,N-M] (see `python cli.py pending`).",
+              file=sys.stderr)
+        return 1
+
+    items = queue.select(selection)
+    if not items:
+        print("Selection matched no queued items.", file=sys.stderr)
+        return 1
+
+    settings = config.get_settings(require_cookies=True)
+    reader = LeagueReader(settings)
+    for line in apply_mod.apply_selection(items, reader=reader, settings=settings):
+        print(line)
+
+    applied = {i.n for i in items}
+    queue.items = [i for i in queue.items if i.n not in applied]
+    if queue.items:
+        queue.save()
+    else:
+        queue.consume()
+    return 0
+
+
+def cmd_poll(args: argparse.Namespace) -> int:
+    """Check the inbox once for a confirmation reply and apply what was approved."""
+    settings = config.get_settings(require_cookies=True)
+    print(apply_job.poll_once(settings))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ESPN fantasy baseball assistant")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -259,6 +320,18 @@ def main(argv: list[str] | None = None) -> int:
     p_streamer.add_argument("--drop", metavar="NAME_OR_ID",
                             help="record a streamer you dropped (stops tracking it)")
     p_streamer.set_defaults(func=cmd_streamer)
+
+    sub.add_parser("pending", help="show queued, awaiting-confirmation changes") \
+        .set_defaults(func=cmd_pending)
+
+    p_apply = sub.add_parser("apply", help="apply queued changes (computer fallback)")
+    group = p_apply.add_mutually_exclusive_group()
+    group.add_argument("--all", action="store_true", help="apply every queued item")
+    group.add_argument("--only", metavar="N[,N-M]", help="apply only these item numbers")
+    p_apply.set_defaults(func=cmd_apply)
+
+    sub.add_parser("poll", help="check email for a confirmation reply and apply it") \
+        .set_defaults(func=cmd_poll)
 
     args = parser.parse_args(argv)
     try:

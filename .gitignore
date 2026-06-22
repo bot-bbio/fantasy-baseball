@@ -29,3 +29,4 @@ mach.exe
 Thumbs.db
 # --- Local git worktrees ---
 .worktrees/
+
