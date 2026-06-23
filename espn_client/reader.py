@@ -6,6 +6,7 @@ Wraps ``espn_api.baseball.League`` and maps its Player objects into our
 """
 from __future__ import annotations
 
+import datetime as dt
 from functools import lru_cache
 
 from espn_api.baseball import League
@@ -16,7 +17,7 @@ from analysis.budget import AcquisitionBudget, compute_budget
 from models import RosterPlayer
 
 
-def _to_roster_player(player) -> RosterPlayer:
+def _to_roster_player(player, *, acquisition_date=None) -> RosterPlayer:
     """Map an espn-api baseball Player into our RosterPlayer."""
     season = player.stats.get(0, {})
     projected_stats = {
@@ -42,6 +43,8 @@ def _to_roster_player(player) -> RosterPlayer:
         projected_stats=projected_stats,
         season_stats=season_stats,
         percent_owned=float(getattr(player, "percent_owned", 0) or 0),
+        acquisition_date=acquisition_date,
+        acquisition_type=str(getattr(player, "acquisitionType", "") or ""),
     )
 
 
@@ -97,7 +100,33 @@ class LeagueReader:
         return team
 
     def roster(self) -> list[RosterPlayer]:
-        return [_to_roster_player(p) for p in self.my_team().roster]
+        acquired = self._acquisition_dates()
+        return [_to_roster_player(p, acquisition_date=acquired.get(int(p.playerId)))
+                for p in self.my_team().roster]
+
+    @lru_cache(maxsize=1)
+    def _acquisition_dates(self) -> dict[int, dt.date]:
+        """player_id -> date the player was added to my roster (for streamer-slot detection).
+
+        espn-api exposes ``acquisitionType`` on the player but not the date, so we read the
+        raw ``mRoster`` view once. Best-effort: any failure yields ``{}`` (unknown dates),
+        which simply reverts streamer detection to its pre-acquisition-data behaviour rather
+        than breaking the roster read.
+        """
+        out: dict[int, dt.date] = {}
+        try:
+            data = self.league.espn_request.league_get(params={"view": "mRoster"})
+        except Exception:
+            return out
+        for team in data.get("teams", []):
+            if team.get("id") != self.settings.team_id:
+                continue
+            for entry in team.get("roster", {}).get("entries", []):
+                ms = entry.get("acquisitionDate")
+                pid = entry.get("playerId")
+                if ms and pid is not None:
+                    out[int(pid)] = dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).date()
+        return out
 
     def free_agents(self, position: str | None = None, size: int = 75) -> list[RosterPlayer]:
         players = self.league.free_agents(size=size, position=position)

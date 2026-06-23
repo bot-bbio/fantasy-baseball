@@ -6,6 +6,7 @@ espn-api internals and can be exercised with hand-built fixtures.
 """
 from __future__ import annotations
 
+import datetime as dt
 import unicodedata
 from dataclasses import dataclass, field
 
@@ -52,6 +53,8 @@ class RosterPlayer:
     projected_stats: dict[str, float] = field(default_factory=dict)  # ESPN season projection
     season_stats: dict[str, float] = field(default_factory=dict)     # actual season-to-date
     percent_owned: float = 0.0
+    acquisition_date: dt.date | None = None   # when this player joined the roster (None = unknown)
+    acquisition_type: str = ""                # ESPN type, e.g. "DRAFT", "ADD", "TRADE"
 
     @property
     def is_pitcher(self) -> bool:

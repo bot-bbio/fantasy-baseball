@@ -27,10 +27,12 @@ def hitter(
 def pitcher(
     pid, name, team="NYY", slots=("SP", "P"), pts=20.0, slot="BE",
     status="ACTIVE", injured=False, owned=50.0, stats=None, season=None, position="SP",
+    acquired=None, acq_type="",
 ) -> RosterPlayer:
     return RosterPlayer(
         player_id=pid, name=name, pro_team=team, position=position,
         eligible_slots=list(slots), lineup_slot=slot, injury_status=status,
         injured=injured, projected_points=pts, projected_stats=stats or {},
         season_stats=season or {}, percent_owned=owned,
+        acquisition_date=acquired, acquisition_type=acq_type,
     )

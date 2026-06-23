@@ -20,6 +20,7 @@ If research data is unavailable the model degrades to ESPN stats automatically.
 """
 from __future__ import annotations
 
+import datetime as dt
 import statistics
 from dataclasses import dataclass, field
 
@@ -44,6 +45,12 @@ TWO_START_BONUS = 12.0
 # many dedicated relievers. Streaming adds starters, so without this guard the model can
 # pick a reliever as the "weakest" non-starting arm and quietly gut the bullpen.
 MIN_RELIEVERS = 2
+
+# Streamer-slot detection: only a *recently acquired* arm is a disposable streamer. A
+# drafted pitcher, or one held longer than this many days, is a keeper and is never offered
+# as a streamer-drop -- so a slumping but established starter (the weakest by raw skill) is
+# protected from being churned for a marginal pickup. Tune here.
+STREAMER_MAX_AGE_DAYS = 21
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -121,6 +128,28 @@ def _is_reliever(player: RosterPlayer) -> bool:
     dropping one does not erode the relief corps the ``MIN_RELIEVERS`` floor protects.
     """
     return ("RP" in player.eligible_slots or player.position == "RP") and not _is_starter(player)
+
+
+def _is_recent_add(player: RosterPlayer, today: dt.date, max_age_days: int) -> bool:
+    """True if the player is a recently-picked-up streamer (a disposable add).
+
+    Unknown acquisition info (no date, or a draft pick) is *not* recent -- so test fixtures
+    and drafted arms are never mistaken for streamers.
+    """
+    if player.acquisition_type == "DRAFT" or player.acquisition_date is None:
+        return False
+    return (today - player.acquisition_date).days <= max_age_days
+
+
+def _is_keeper(player: RosterPlayer, today: dt.date, max_age_days: int) -> bool:
+    """True if the player is a core arm to protect from streamer-drops: a draft pick, or one
+    held longer than ``max_age_days``. Unknown acquisition info is *not* a keeper, which
+    preserves the pre-acquisition-data behaviour for hand-built fixtures."""
+    if player.acquisition_type == "DRAFT":
+        return True
+    if player.acquisition_date is None:
+        return False
+    return (today - player.acquisition_date).days > max_age_days
 
 
 def _talent_metrics(player: RosterPlayer, research) -> dict:
@@ -216,6 +245,14 @@ def _first_start_day(player: RosterPlayer, schedules: list[DaySchedule]) -> DayS
     return None
 
 
+def _schedule_date(schedule: DaySchedule) -> dt.date:
+    """Today's date from the schedule (for acquisition-age math); today() if unparseable."""
+    try:
+        return dt.date.fromisoformat(schedule.date)
+    except (ValueError, TypeError):
+        return dt.date.today()
+
+
 def _matchup_ops(player, day, offense, research) -> float | None:
     """Opponent OPS, platoon-adjusted to the pitcher's hand when we can determine it."""
     opponent_id = day.opponent_id(player.pro_team)
@@ -237,14 +274,16 @@ def recommend_streamers(
     scored_categories: tuple[str, ...] = (),
     streamer_ids: frozenset[int] = frozenset(),
     min_relievers: int = MIN_RELIEVERS,
+    max_streamer_age_days: int = STREAMER_MAX_AGE_DAYS,
     limit: int = 6,
 ) -> list[StreamerRecommendation]:
     """Rank free-agent starters and pair each with the safest drop.
 
-    ``streamer_ids`` are the rostered pitchers we previously picked up as streamers
-    (the disposable slots). They are recycled before any core arm is ever proposed as
-    a drop, so an ace in a slump -- which can look like the weakest pitcher on raw
-    skill -- is protected from accidental churn.
+    The drop is always a *disposable* arm, identified two ways: pitchers explicitly tracked
+    in ``streamer_ids`` (the manual streamer log), and -- automatically -- any arm acquired
+    within ``max_streamer_age_days`` (a recent waiver pickup). Drafted or long-held pitchers
+    are keepers and are never offered as a drop, so an established but slumping starter (the
+    weakest by raw skill) is protected from being churned for a marginal pickup.
 
     ``min_relievers`` enforces a bullpen floor: only the weakest *surplus* relievers
     (those above the floor) are ever offered as drops, so a streaming add can never
@@ -293,21 +332,40 @@ def recommend_streamers(
         if not _is_reliever(p) or p.player_id in droppable_reliever_ids
     ]
 
-    # Recycle tracked streamer slots first; only then touch (the weakest) core arms.
-    recyclable = sorted((p for p in candidates if p.player_id in streamer_ids), key=by_skill)
-    core = sorted((p for p in candidates if p.player_id not in streamer_ids), key=by_skill)
-    droppable = recyclable + core
+    # Keeper protection: only a recently-added arm (or one explicitly tracked) is a
+    # disposable streamer. Drafted / long-held pitchers are core and never offered as a
+    # drop, so the streaming slot recycles through pickups instead of cannibalizing an
+    # established starter that merely happens to be the weakest by raw skill.
+    today_date = _schedule_date(today)
+    candidates = [
+        p for p in candidates
+        if p.player_id in streamer_ids
+        or not _is_keeper(p, today_date, max_streamer_age_days)
+    ]
 
+    # Recycle tracked streamer slots first, then the weakest recently-added arm.
+    recyclable = sorted((p for p in candidates if p.player_id in streamer_ids), key=by_skill)
+    fresh = sorted((p for p in candidates if p.player_id not in streamer_ids), key=by_skill)
+    droppable = recyclable + fresh
+
+    # Pair the best streamers with the weakest disposable arms: stream[i] takes droppable[i].
+    # Both lists are sorted (streamers by score desc, drops by skill asc), so the gain only
+    # falls as we go -- once the best remaining streamer can't beat the weakest remaining
+    # drop, nothing further can, and we stop. With a full roster every add needs a drop, so
+    # we never surface an unexecutable "add with no drop": running out of disposable arms
+    # ends the list (the report then reads "nothing worth streaming").
     recommendations: list[StreamerRecommendation] = []
     for index, evaluation in enumerate(evaluations):
-        if len(recommendations) >= limit:
+        if len(recommendations) >= limit or index >= len(droppable):
             break
-        drop = droppable[index] if index < len(droppable) else None
-        baseline = _skill_baseline(drop, research, k_weight) if drop else 50.0
-        gain = evaluation.score - baseline
+        drop = droppable[index]
+        gain = evaluation.score - _skill_baseline(drop, research, k_weight)
         if gain <= 0:
-            continue
-        drop_is_streamer = drop is not None and drop.player_id in streamer_ids
+            break
+        drop_is_streamer = (
+            drop.player_id in streamer_ids
+            or _is_recent_add(drop, today_date, max_streamer_age_days)
+        )
         recommendations.append(
             StreamerRecommendation(evaluation, drop, gain, drop_is_streamer)
         )

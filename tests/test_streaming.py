@@ -139,6 +139,45 @@ def test_reliever_droppable_when_surplus_above_floor():
     assert recs[0].drop.player_id == 2          # only the weakest surplus reliever
 
 
+def test_keeper_is_protected_recent_add_is_dropped():
+    """The Nick Martinez bug: a long-held starter is the weakest arm by skill, but the
+    streamer-drop must recycle a recently-added arm, not churn the established keeper."""
+    import datetime as dt
+    day = _one_game_day()
+    offense = {136: 0.620, 147: 0.760}
+    today = dt.date.fromisoformat("2026-06-21")
+    keeper = pitcher(1, "Established Starter", team="Atl", slots=("SP", "P"),
+                     stats={"ERA": 5.2, "WHIP": 1.45, "K": 120, "OUTS": 450},  # weakest skill
+                     acquired=today - dt.timedelta(days=49), acq_type="ADD")
+    streamer = pitcher(2, "Recent Pickup", team="Bos", slots=("SP", "P"),
+                       stats={"ERA": 3.6, "WHIP": 1.22, "K": 150, "OUTS": 470},
+                       acquired=today - dt.timedelta(days=2), acq_type="ADD")
+    roster = [keeper, streamer]
+    free_agents = [pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                           stats={"ERA": 3.0, "WHIP": 1.05, "K": 200, "OUTS": 540})]
+
+    recs = streaming.recommend_streamers(roster, free_agents, [day], offense)
+    assert len(recs) == 1
+    assert recs[0].drop.player_id == 2          # recent pickup, not the established keeper
+    assert recs[0].drop_is_streamer is True     # recognized as recycling the streamer slot
+
+
+def test_drafted_pitcher_is_never_a_streamer_drop():
+    import datetime as dt
+    day = _one_game_day()
+    offense = {136: 0.620, 147: 0.760}
+    today = dt.date.fromisoformat("2026-06-21")
+    drafted = pitcher(1, "Drafted Arm", team="Atl", slots=("SP", "P"),
+                      stats={"ERA": 5.5, "WHIP": 1.50, "K": 100, "OUTS": 440},  # weakest
+                      acquired=today - dt.timedelta(days=2), acq_type="DRAFT")  # but DRAFTED
+    free_agents = [pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                           stats={"ERA": 3.0, "WHIP": 1.05, "K": 200, "OUTS": 540})]
+
+    recs = streaming.recommend_streamers([drafted], free_agents, [day], offense)
+    # No disposable arm exists, so nothing is recommended (no churning the drafted keeper).
+    assert recs == []
+
+
 def test_parse_team_ops_handles_payload():
     payload = {"stats": [{"splits": [
         {"team": {"id": 147}, "stat": {"ops": ".780"}},
