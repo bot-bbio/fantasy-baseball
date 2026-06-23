@@ -8,7 +8,12 @@ to ESPN until you approve it by replying.
 - **Lineup optimization** — starts players who actually play today and aren't injured,
   fills the scarcest slots first, benches the rest, parks the injured on the IL.
 - **Waivers & streaming** — free-agent starters with an upcoming start, and hitters who
-  out-project your weakest bats, each paired with the safest drop.
+  out-project your weakest bats, each paired with the safest drop. Two relievers are kept
+  on the roster at all times, and offense (steadier than pitching) is held to a single,
+  highest-value move.
+- **Add/drop budget** — every morning it reads the league's acquisition cap (e.g. *N per
+  day* or *per matchup period*) and how many you've used, then queues only the moves that
+  fit, pitchers first. Upgrades beyond the budget are shown for context but not proposed.
 - **Confirm before execute** — every proposed change (lineup + each add/drop) is a numbered
   item in the email. You reply `apply all`, `apply 1,3`, or `no`; a poller applies only what
   you approved and emails back the result. Nothing executes unprompted.

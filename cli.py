@@ -136,6 +136,11 @@ def cmd_waivers(args: argparse.Namespace) -> int:
     schedules = pipeline.upcoming_schedules(reader.settings.timezone, days=args.days)
     streams, hitters = pipeline.gather_waiver_recs(reader, schedules, size=args.size)
 
+    try:
+        print(f"Add/drop budget: {reader.acquisition_budget().describe()}.\n")
+    except Exception:
+        pass  # informational only; never block the recommendations on it
+
     print("Streaming pitchers (model: talent + form + matchup + park):")
     if streams:
         rows = [[s.evaluation.player.name, s.evaluation.player.pro_team,

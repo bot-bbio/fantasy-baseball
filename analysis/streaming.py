@@ -12,6 +12,10 @@ Plus a **two-start bonus** (a start-heavy week is worth far more in weekly leagu
 Weights live in the WEIGHTS block below for easy tuning. `gain` is the score minus the
 weakest droppable arm's skill, so only genuine upgrades surface.
 
+A **bullpen floor** (``MIN_RELIEVERS``) guards roster construction: streaming adds
+starters, so the drop side must never fall below two dedicated relievers -- only surplus
+relievers above the floor are ever offered as drops.
+
 If research data is unavailable the model degrades to ESPN stats automatically.
 """
 from __future__ import annotations
@@ -35,6 +39,11 @@ LG_K9 = 8.6
 # Top-level component weights (sum to 1.0) -- tune here.
 W_TALENT, W_FORM, W_MATCHUP, W_PARK = 0.28, 0.27, 0.30, 0.15
 TWO_START_BONUS = 12.0
+
+# Bullpen floor: never propose a drop that would leave the roster with fewer than this
+# many dedicated relievers. Streaming adds starters, so without this guard the model can
+# pick a reliever as the "weakest" non-starting arm and quietly gut the bullpen.
+MIN_RELIEVERS = 2
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
@@ -103,6 +112,15 @@ def _park_score(factor: int) -> float:
 
 def _is_starter(player: RosterPlayer) -> bool:
     return "SP" in player.eligible_slots or player.position == "SP"
+
+
+def _is_reliever(player: RosterPlayer) -> bool:
+    """A dedicated reliever -- RP-eligible but not a starter.
+
+    Swingmen (SP+RP) count as starters here: they can still be streamed/started, so
+    dropping one does not erode the relief corps the ``MIN_RELIEVERS`` floor protects.
+    """
+    return ("RP" in player.eligible_slots or player.position == "RP") and not _is_starter(player)
 
 
 def _talent_metrics(player: RosterPlayer, research) -> dict:
@@ -218,6 +236,7 @@ def recommend_streamers(
     research=None,
     scored_categories: tuple[str, ...] = (),
     streamer_ids: frozenset[int] = frozenset(),
+    min_relievers: int = MIN_RELIEVERS,
     limit: int = 6,
 ) -> list[StreamerRecommendation]:
     """Rank free-agent starters and pair each with the safest drop.
@@ -226,6 +245,10 @@ def recommend_streamers(
     (the disposable slots). They are recycled before any core arm is ever proposed as
     a drop, so an ace in a slump -- which can look like the weakest pitcher on raw
     skill -- is protected from accidental churn.
+
+    ``min_relievers`` enforces a bullpen floor: only the weakest *surplus* relievers
+    (those above the floor) are ever offered as drops, so a streaming add can never
+    take the roster below ``min_relievers`` dedicated relief pitchers.
     """
     league_ops = league_average_ops(offense)
     k_weight = _k_weight(scored_categories)
@@ -256,6 +279,20 @@ def recommend_streamers(
     today = schedules[0]
     candidates = [p for p in roster if p.is_pitcher and not is_probable_today(p, today)]
     by_skill = lambda p: _skill_baseline(p, research, k_weight)  # noqa: E731
+
+    # Bullpen floor: keep at least ``min_relievers`` relievers. Of the relievers on the
+    # roster, only the weakest surplus (count above the floor) may be dropped; the rest
+    # are filtered out of the candidate pool entirely so they're never proposed. Because
+    # at most ``surplus`` relievers remain droppable, the floor holds even across the
+    # several recommendations a single report can make.
+    roster_relievers = sorted((p for p in roster if _is_reliever(p)), key=by_skill)
+    surplus = max(0, len(roster_relievers) - max(0, min_relievers))
+    droppable_reliever_ids = {p.player_id for p in roster_relievers[:surplus]}
+    candidates = [
+        p for p in candidates
+        if not _is_reliever(p) or p.player_id in droppable_reliever_ids
+    ]
+
     # Recycle tracked streamer slots first; only then touch (the weakest) core arms.
     recyclable = sorted((p for p in candidates if p.player_id in streamer_ids), key=by_skill)
     core = sorted((p for p in candidates if p.player_id not in streamer_ids), key=by_skill)

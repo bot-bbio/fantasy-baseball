@@ -69,6 +69,11 @@ def build_lineup_plan(
     return plan, roster
 
 
+# The offense is steadier than the pitching staff, so we surface far fewer hitter moves
+# than streaming options -- a short list of only the clearest upgrades.
+HITTER_REC_LIMIT = 3
+
+
 def gather_waiver_recs(
     reader: LeagueReader, schedules: list[DaySchedule], *, size: int = 75
 ):
@@ -89,5 +94,6 @@ def gather_waiver_recs(
         roster, free_agents,
         is_points=reader.is_points_league(),
         categories=categories,
+        limit=HITTER_REC_LIMIT,
     )
     return streams, hitters

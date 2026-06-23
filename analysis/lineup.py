@@ -2,7 +2,15 @@
 
 Given a roster, the league's active-slot shape, and today's MLB schedule, decide the
 best legal lineup: start players who actually play today and aren't injured, fill the
-scarcest slots first, bench the rest, and park the injured on the IL.
+scarcest slots first, and park the injured on the IL.
+
+Filling the active roster is a **soft target**, not a hard one. On a light schedule day
+(many teams rest Mon/Thu) the optimizer leaves healthy players parked in their current
+slots rather than benching them to chase a "full" lineup -- an idle player scores zero
+whether benched or parked, so benching them is pure churn you'd just undo tomorrow. It
+also never moves a player who is already starting into a different slot. The result is the
+*minimal* set of moves: bench the injured, slot in players who genuinely add today's games,
+and otherwise leave the lineup alone.
 
 The output is a *target assignment* (player -> slot) plus the minimal set of moves to
 get there. The browser layer executes the moves; nothing here touches ESPN.
@@ -16,8 +24,10 @@ from analysis.scoring import compute_category_scores, player_value
 from data.mlb_schedule import DaySchedule
 from models import (
     BENCH_SLOT,
+    HITTER_SLOTS,
     IL_SLOT,
     INACTIVE_SLOTS,
+    PITCHER_SLOTS,
     RosterPlayer,
     normalize_name,
 )
@@ -40,10 +50,24 @@ class LineupPlan:
     moves: list[Move] = field(default_factory=list)
     benched_today: list[str] = field(default_factory=list)
     empty_slots: list[str] = field(default_factory=list)
+    two_way_pitching: list[str] = field(default_factory=list)  # two-way players slotted to pitch
 
     @property
     def has_changes(self) -> bool:
         return bool(self.moves)
+
+    def two_way_prompt(self) -> str | None:
+        """Nudge for the 'Ohtani rule': when a two-way starter is moved to the mound, say
+        how his vacated bat slot is covered -- backfilled from the bench, or open for a pickup."""
+        if not self.two_way_pitching:
+            return None
+        who = ", ".join(self.two_way_pitching)
+        open_bats = [s for s in self.empty_slots if s in HITTER_SLOTS]
+        if open_bats:
+            return (f"{who} is pitching today, so the {open_bats[0]} slot is open -- "
+                    "add a hitter to fill it (see best-available hitters).")
+        return (f"{who} is pitching today; his bat slot was backfilled from your bench "
+                "(see lineup moves).")
 
 
 def is_probable_today(player: RosterPlayer, schedule: DaySchedule) -> bool:
@@ -63,6 +87,17 @@ def can_fill_today(player: RosterPlayer, slot: str, schedule: DaySchedule) -> bo
     if slot == "P":  # generic pitcher slot: today's starter, or an available reliever
         return is_probable_today(player, schedule) or ("RP" in player.eligible_slots and plays)
     return plays  # hitter slot: just needs a game today
+
+
+def _pitching_slot(player: RosterPlayer, remaining: list[str]) -> str | None:
+    """An open pitching slot for a two-way starter, preferring his current one (less churn),
+    then a dedicated SP slot, then a generic P slot. None if no pitching slot is free."""
+    prefs = [player.lineup_slot] if player.lineup_slot in PITCHER_SLOTS else []
+    prefs += ["SP", "P"]
+    for slot in prefs:
+        if slot in remaining and player.eligible_for(slot):
+            return slot
+    return None
 
 
 def expand_active_slots(slot_counts: dict[str, int]) -> list[str]:
@@ -155,10 +190,51 @@ def optimize_lineup(
         assignments[player.player_id] = IL_SLOT
         assigned.add(player.player_id)
 
-    # 3. Fill active slots with players who can actually play today (best first).
+    # 3. Two-way "Ohtani rule": a player who is the probable starting pitcher today *and*
+    # is also a hitter is slotted on the mound, not at UTIL -- a start (Ks/IP/W) outweighs a
+    # day of DH. We claim his pitching slot before anything else fills it; the steps below
+    # then backfill his vacated bat slot from the bench (or flag it for a pickup). This must
+    # run before incumbent pinning, or he'd be pinned to UTIL and never pitch.
+    two_way_pitching: list[str] = []
+    for player in roster:
+        if (player.player_id not in assigned and not player.is_out
+                and player.is_hitter and is_probable_today(player, schedule)):
+            pitch_slot = _pitching_slot(player, remaining)
+            if pitch_slot is not None:
+                assignments[player.player_id] = pitch_slot
+                assigned.add(player.player_id)
+                remaining.remove(pitch_slot)
+                two_way_pitching.append(player.name)
+
+    # 4. Pin players already in a valid active slot who actually contribute today, so the
+    # optimizer never churns them laterally. Without this, a scarce slot (e.g. SS) pulls in
+    # a player who is already starting elsewhere (e.g. OF), needlessly reshuffling the
+    # lineup -- and, in doing so, benching whoever held the scarce slot for no gain.
+    for player in roster:
+        slot = player.lineup_slot
+        if (player.player_id not in assigned and slot in remaining
+                and can_fill_today(player, slot, schedule)):
+            assignments[player.player_id] = slot
+            assigned.add(player.player_id)
+            remaining.remove(slot)
+
+    # 5. Fill the still-open active slots with the best players who can play today.
     remaining = greedy_fill(remaining, lambda p, slot: can_fill_today(p, slot, schedule))
 
-    # 4. The bench has limited capacity. If more players would land on the bench than fit,
+    # 6. Soft roster target: a healthy player already in an active slot stays parked there
+    # on a rest day instead of being benched -- *unless* a player who actually plays today
+    # claimed that slot in step 5. This is what stops the daily churn of benching idle bats
+    # (and rotation SPs between starts) only to re-add them tomorrow; an off-day starter
+    # scores zero whether benched or parked, so leaving them put is strictly less churn.
+    for player in roster:
+        slot = player.lineup_slot
+        if (player.player_id not in assigned and not player.is_out
+                and slot in remaining and player.eligible_for(slot)):
+            assignments[player.player_id] = slot
+            assigned.add(player.player_id)
+            remaining.remove(slot)
+
+    # 7. The bench has limited capacity. If more players would land on the bench than fit,
     # force the overflow into the remaining active slots (by eligibility, healthy only) --
     # a full roster can't leave an active slot empty while overflowing the bench.
     locked_on_bench = sum(1 for slot in assignments.values() if slot == BENCH_SLOT)
@@ -173,7 +249,7 @@ def optimize_lineup(
 
     empty_slots = list(remaining)
 
-    # 5. Everyone still unplaced benches.
+    # 8. Everyone still unplaced benches.
     for player in roster:
         assignments.setdefault(player.player_id, BENCH_SLOT)
 
@@ -185,4 +261,4 @@ def optimize_lineup(
     benched_today = [
         p.name for p in roster if assignments[p.player_id] == BENCH_SLOT
     ]
-    return LineupPlan(assignments, moves, benched_today, empty_slots)
+    return LineupPlan(assignments, moves, benched_today, empty_slots, two_way_pitching)

@@ -21,6 +21,7 @@ __pycache__/
 conductor/
 STRATEGY.md
 WORKFLOW.md
+NEXT_STEPS.md
 bootstrap.ps1
 mach.exe
 

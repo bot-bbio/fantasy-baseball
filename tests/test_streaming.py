@@ -98,6 +98,47 @@ def test_recommend_protects_core_arm_via_streamer_slot():
     assert tracked[0].drop_is_streamer is True
 
 
+def test_reliever_protected_by_bullpen_floor():
+    """A reliever can be the weakest non-starting arm by skill, but with only the floor
+    number of relievers on the roster, none may be proposed as a drop."""
+    day = _one_game_day()                       # NYY home vs Mariners (0.620 OPS)
+    offense = {136: 0.620, 147: 0.760}
+    # Two relievers (no SP eligibility) -- exactly the floor -- plus a weak starter.
+    rp1 = pitcher(1, "Closer", team="Atl", slots=("RP", "P"), position="RP",
+                  stats={"ERA": 4.8, "WHIP": 1.40, "K": 60, "OUTS": 180})
+    rp2 = pitcher(2, "Setup Man", team="Bos", slots=("RP", "P"), position="RP",
+                  stats={"ERA": 5.5, "WHIP": 1.55, "K": 50, "OUTS": 170})  # weakest skill
+    starter = pitcher(3, "Weak Starter", team="Atl", slots=("SP", "P"),
+                      stats={"ERA": 5.0, "WHIP": 1.50, "K": 80, "OUTS": 450})
+    roster = [rp1, rp2, starter]
+    free_agents = [pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                           stats={"ERA": 3.0, "WHIP": 1.05, "K": 200, "OUTS": 540})]
+
+    recs = streaming.recommend_streamers(roster, free_agents, [day], offense)
+    assert len(recs) == 1
+    # The starter is dropped even though a reliever scores worse on raw skill.
+    assert recs[0].drop.player_id == 3
+
+
+def test_reliever_droppable_when_surplus_above_floor():
+    """A third reliever is surplus over the floor, so the weakest one may be dropped."""
+    day = _one_game_day()
+    offense = {136: 0.620, 147: 0.760}
+    rp_weak = pitcher(2, "Weak Reliever", team="Bos", slots=("RP", "P"), position="RP",
+                      stats={"ERA": 6.0, "WHIP": 1.70, "K": 40, "OUTS": 150})  # weakest
+    rp_mid = pitcher(1, "Closer", team="Atl", slots=("RP", "P"), position="RP",
+                     stats={"ERA": 3.2, "WHIP": 1.10, "K": 90, "OUTS": 200})
+    rp_good = pitcher(3, "Setup Man", team="Atl", slots=("RP", "P"), position="RP",
+                      stats={"ERA": 2.8, "WHIP": 1.00, "K": 95, "OUTS": 210})
+    roster = [rp_weak, rp_mid, rp_good]         # three relievers, floor is two
+    free_agents = [pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                           stats={"ERA": 3.0, "WHIP": 1.05, "K": 200, "OUTS": 540})]
+
+    recs = streaming.recommend_streamers(roster, free_agents, [day], offense)
+    assert len(recs) == 1
+    assert recs[0].drop.player_id == 2          # only the weakest surplus reliever
+
+
 def test_parse_team_ops_handles_payload():
     payload = {"stats": [{"splits": [
         {"team": {"id": 147}, "stat": {"ops": ".780"}},

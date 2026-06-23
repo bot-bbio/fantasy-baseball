@@ -14,14 +14,18 @@ from __future__ import annotations
 import datetime as dt
 
 import config
+import email_report
 import pipeline
+from analysis.budget import AcquisitionBudget
 from data import mlb_schedule
 from espn_client.reader import LeagueReader
 from pending import ADD_DROP, LINEUP, PendingQueue
 
 # Keep the approval list short and actionable rather than dumping the whole board.
+# The offense is steadier than the pitching staff, so we propose at most one hitter move
+# and let streaming -- which is date-sensitive -- take priority for a scarce add/drop.
 MAX_STREAMERS = 3
-MAX_HITTERS = 3
+MAX_HITTERS = 1
 
 
 def _lineup_payload(plan) -> dict:
@@ -58,38 +62,61 @@ def _hitter_payload(rec) -> dict | None:
     }
 
 
-def build_queue(plan, streams, hitters, *, path=None) -> PendingQueue:
-    """Turn the lineup plan + recommendations into a numbered, confirmable queue."""
+def _executable_add_drops(streams, hitters) -> list[tuple[str, dict]]:
+    """All proposed add/drops that have an executable payload, in priority order.
+
+    Streaming pitchers come first: a start is date-sensitive (a great matchup today is
+    gone tomorrow), whereas a hitter upgrade keeps. So when only a few moves fit the
+    league's add/drop budget, the streams win the slot.
+    """
+    items: list[tuple[str, dict]] = []
+    for rec in streams[:MAX_STREAMERS]:
+        payload = _streamer_payload(rec)
+        if payload is None:
+            continue
+        tag = "recycles streamer slot" if rec.drop_is_streamer else "opens NEW streamer slot"
+        items.append((f"ADD {payload['add_name']} ({payload['add_team']}) / "
+                      f"DROP {payload['drop_name']} - stream, {tag}", payload))
+    for rec in hitters[:MAX_HITTERS]:
+        payload = _hitter_payload(rec)
+        if payload is None:
+            continue
+        items.append((f"ADD {payload['add_name']} ({payload['add_team']}) / "
+                      f"DROP {payload['drop_name']} - hitter upgrade", payload))
+    return items
+
+
+def build_queue(plan, streams, hitters, budget, *, path=None) -> tuple[PendingQueue, int]:
+    """Turn the lineup plan + recommendations into a numbered, confirmable queue.
+
+    The league caps how many add/drops we may make (``budget``). Lineup changes are free,
+    but only ``budget.remaining`` add/drops are queued -- the highest-priority ones. The
+    second return value is how many executable add/drops were held back by that cap.
+    """
     queue = PendingQueue.new(path=path)
 
     if plan.has_changes:
         queue.add(LINEUP, f"Set optimal lineup ({len(plan.moves)} move(s))",
                   _lineup_payload(plan))
 
-    for rec in streams[:MAX_STREAMERS]:
-        payload = _streamer_payload(rec)
-        if payload is None:
-            continue
-        tag = "recycles streamer slot" if rec.drop_is_streamer else "opens NEW streamer slot"
-        queue.add(ADD_DROP,
-                  f"ADD {payload['add_name']} ({payload['add_team']}) / "
-                  f"DROP {payload['drop_name']} - stream, {tag}", payload)
+    add_drops = _executable_add_drops(streams, hitters)
+    allowed = add_drops if budget.remaining is None else add_drops[: budget.remaining]
+    for description, payload in allowed:
+        queue.add(ADD_DROP, description, payload)
 
-    for rec in hitters[:MAX_HITTERS]:
-        payload = _hitter_payload(rec)
-        if payload is None:
-            continue
-        queue.add(ADD_DROP,
-                  f"ADD {payload['add_name']} ({payload['add_team']}) / "
-                  f"DROP {payload['drop_name']} - hitter upgrade", payload)
-
-    return queue
+    return queue, len(add_drops) - len(allowed)
 
 
-def _render_pending(queue: PendingQueue) -> list[str]:
-    out = ["## Pending changes - reply to approve", ""]
+def _render_pending(queue: PendingQueue, budget: AcquisitionBudget, held_back: int) -> list[str]:
+    out = ["## Pending changes - reply to approve", "",
+           f"**Add/drop budget:** {budget.describe()}.", ""]
+    if held_back:
+        out += [f"> Only the top {'move' if budget.remaining == 1 else f'{budget.remaining} moves'} "
+                f"fit your budget; {held_back} further upgrade(s) are listed below but not queued.",
+                ""]
     if queue.is_empty:
-        out += ["_Nothing to change today: lineup is optimal and no upgrades found._", ""]
+        out += ["_Nothing to change today: lineup is optimal and no add/drops are within budget._",
+                ""]
         return out
     out += [
         f"Reply to this email to apply. Token: `{queue.token}`.",
@@ -110,9 +137,12 @@ def _render_pending(queue: PendingQueue) -> list[str]:
     return out
 
 
-def _render(team_name, queue, plan, streams, hitters, when) -> str:
+def _render(team_name, queue, plan, streams, hitters, when, budget, held_back) -> str:
     out = [f"# Daily report - {when:%Y-%m-%d %H:%M}", "", f"**Team:** {team_name}", ""]
-    out += _render_pending(queue)
+    out += _render_pending(queue, budget, held_back)
+
+    if plan.two_way_prompt():
+        out += [f"> ⚾ {plan.two_way_prompt()}", ""]
 
     if plan.empty_slots:
         out += [f"> ! Could not fill: {', '.join(plan.empty_slots)} "
@@ -180,6 +210,7 @@ def main() -> int:
         plan, _ = pipeline.build_lineup_plan(reader, schedule)
         schedules = pipeline.upcoming_schedules(settings.timezone, days=2)
         streams, hitters = pipeline.gather_waiver_recs(reader, schedules)
+        budget = _budget(reader)
         team_name = reader.my_team().team_name
     except Exception as exc:  # produce a report instead of failing silently
         report = f"# Daily report - {now:%Y-%m-%d %H:%M}\n\n! Run failed: {exc}\n"
@@ -189,13 +220,13 @@ def main() -> int:
         _notify(settings, f"Fantasy Baseball {now:%b %d}: run FAILED", report)
         return 1
 
-    queue = build_queue(plan, streams, hitters)
+    queue, held_back = build_queue(plan, streams, hitters, budget)
     if queue.is_empty:
         config.PENDING_FILE.unlink(missing_ok=True)  # no stale queue lingering
     else:
         queue.save()
 
-    report = _render(team_name, queue, plan, streams, hitters, now)
+    report = _render(team_name, queue, plan, streams, hitters, now, budget, held_back)
     path = _write_report(report, today)
     print(report)
     print(f"\nReport: {path}")
@@ -205,17 +236,33 @@ def main() -> int:
     else:
         subject = (f"Fantasy Baseball {now:%b %d}: "
                    f"{len(queue.items)} change(s) to approve [FB {queue.token}]")
-    _notify(settings, subject, report)
+    # The saved file keeps the Markdown report; the email gets a phone-friendly rendering.
+    text_body, html_body = email_report.render_email(
+        team_name, queue, plan, streams, hitters, now, budget, held_back)
+    _notify(settings, subject, text_body, html=html_body)
     return 0
 
 
-def _notify(settings, subject: str, body: str) -> None:
+def _budget(reader) -> AcquisitionBudget:
+    """The league's add/drop budget; an unlimited fallback if ESPN can't be read.
+
+    Never let a budget-fetch error fail the run -- worst case we revert to the prior
+    behaviour of proposing every upgrade.
+    """
+    try:
+        return reader.acquisition_budget()
+    except Exception as exc:
+        print(f"! Could not read add/drop budget ({exc}); assuming unlimited.")
+        return AcquisitionBudget.unlimited()
+
+
+def _notify(settings, subject: str, body: str, *, html: str | None = None) -> None:
     """Email the summary if configured; never let a notification error fail the run."""
     if not settings.email_enabled:
         return
     try:
         from notify import send_email
-        send_email(subject, body, settings)
+        send_email(subject, body, settings, html=html)
         print("Email notification sent.")
     except Exception as exc:
         print(f"! Email notification failed: {exc}")

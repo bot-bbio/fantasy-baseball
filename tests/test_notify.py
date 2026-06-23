@@ -29,3 +29,19 @@ def test_build_message_sets_headers():
     assert message["To"] == "me@gmail.com"
     assert message["Subject"] == "Subject"
     assert "Body text" in message.get_content()
+
+
+def test_build_message_with_html_is_multipart_alternative():
+    settings = _settings(
+        email_sender="agent@gmail.com",
+        email_app_password="apppass",
+        email_recipient="me@gmail.com",
+    )
+    message = build_message("Subj", "plain fallback", settings, html="<b>rich</b>")
+    assert message.get_content_type() == "multipart/alternative"
+    # The plain-text part survives (reply parser + text-only clients depend on it)...
+    plain = message.get_body(preferencelist=("plain",))
+    assert plain is not None and "plain fallback" in plain.get_content()
+    # ...and the HTML alternative is present and preferred.
+    html = message.get_body(preferencelist=("html",))
+    assert html is not None and "<b>rich</b>" in html.get_content()

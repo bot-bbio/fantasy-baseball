@@ -12,6 +12,7 @@ from espn_api.baseball import League
 from espn_api.baseball.constant import POSITION_MAP, STATS_MAP
 
 import config
+from analysis.budget import AcquisitionBudget, compute_budget
 from models import RosterPlayer
 
 
@@ -113,6 +114,22 @@ class LeagueReader:
             name = POSITION_MAP.get(int(slot_id), str(slot_id))
             result[name] = int(count)
         return result
+
+    def acquisition_budget(self) -> AcquisitionBudget:
+        """How many add/drops remain right now (league caps minus my usage).
+
+        One request pulls the league's acquisition settings and my team's transaction
+        counter; :func:`analysis.budget.compute_budget` turns them into a remaining count.
+        """
+        data = self.league.espn_request.league_get(params={"view": ["mSettings", "mTeam"]})
+        acq = data.get("settings", {}).get("acquisitionSettings", {}) or {}
+        period = data.get("status", {}).get("currentMatchupPeriod", 0)
+        counter: dict = {}
+        for team in data.get("teams", []):
+            if team.get("id") == self.settings.team_id:
+                counter = team.get("transactionCounter", {}) or {}
+                break
+        return compute_budget(acq, counter, period)
 
     def standings(self):
         return self.league.standings()
