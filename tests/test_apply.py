@@ -126,3 +126,56 @@ def test_verify_confirms_changes_via_reread(tmp_path, monkeypatch):
     items = [_lineup_item(1), _add_item(2, add_id=10, drop_id=20, streamer=True)]
     lines = _apply(items, log=log, verify=True)
     assert any("Verified via re-read" in ln for ln in lines)
+
+
+class _NotReflectedReader:
+    """Re-read where an add/drop didn't land: the dropped player (20) is still on the
+    roster and the added player (10) is absent -- the accepted-but-not-yet-visible case."""
+
+    def __init__(self, settings):
+        pass
+
+    def roster(self):
+        return [hitter(20, "D20", slot="BE")]
+
+
+def test_verify_addrop_accepted_but_locked_is_pending_not_rejection(tmp_path, monkeypatch):
+    # Regression: an add/drop ESPN accepted (2xx) but not yet visible during locked hours was
+    # wrongly reported as "ESPN may have rejected part", making a successful swap look failed.
+    monkeypatch.setattr(apply, "LeagueReader", _NotReflectedReader)
+    monkeypatch.setattr(apply, "_day_locked", lambda settings: True)
+    log = StreamerLog(path=tmp_path / "s.json")
+    lines = _apply([_add_item(1, add_id=10, drop_id=20, streamer=True)], log=log, verify=True)
+    text = "\n".join(lines)
+    assert "accepted by ESPN" in text
+    assert "next scoring period" in text
+    assert "may have rejected" not in text
+
+
+def test_verify_addrop_pending_when_not_locked_suggests_recheck(tmp_path, monkeypatch):
+    # Not locked yet and still not reflected: don't cry rejection, but do prompt a re-check.
+    monkeypatch.setattr(apply, "LeagueReader", _NotReflectedReader)
+    monkeypatch.setattr(apply, "_day_locked", lambda settings: False)
+    log = StreamerLog(path=tmp_path / "s.json")
+    lines = _apply([_add_item(1, add_id=10, drop_id=20, streamer=True)], log=log, verify=True)
+    text = "\n".join(lines)
+    assert "accepted by ESPN" in text
+    assert "re-check on ESPN" in text
+    assert "may have rejected" not in text
+
+
+def test_verify_lineup_mismatch_still_warns(tmp_path, monkeypatch):
+    # A lineup move should be visible immediately, so a missing one keeps the warning.
+    class Reader:
+        def __init__(self, settings):
+            pass
+
+        def roster(self):
+            return [hitter(1, "A", slot="BE")]  # expected in UTIL, still on the bench
+
+    monkeypatch.setattr(apply, "LeagueReader", Reader)
+    log = StreamerLog(path=tmp_path / "s.json")
+    lines = _apply([_lineup_item(1)], log=log, verify=True)
+    text = "\n".join(lines)
+    assert "mismatch" in text.lower()
+    assert "A expected in UTIL" in text
