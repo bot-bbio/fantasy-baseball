@@ -43,6 +43,35 @@ def test_strip_quoted_ignores_the_original_below():
     assert inbox.parse_selection(reply) == {1}
 
 
+# --- HTML body handling --------------------------------------------------------------
+
+# An HTML-only reply, as several phone mail clients send: the typed command in a <div>, then
+# the quoted proposal in a <blockquote> beneath it (with a date that contains digits).
+def _html_reply_body(typed: str) -> str:
+    return (
+        f'<div dir="ltr">{typed}</div><br>'
+        '<div class="gmail_quote">On Sun, Jul 5, 2026 at 8:00 AM '
+        'Fantasy Baseball &lt;bot@gmail.com&gt; wrote:<br>'
+        '<blockquote>1. Set optimal lineup (2 move(s))<br>'
+        '2. ADD Reid Detmers (LAA) / DROP Joe Bench</blockquote></div>'
+    )
+
+
+def test_html_only_reply_reads_only_the_typed_command():
+    # Regression: flat tag-stripping collapsed everything onto one line, so "apply all"
+    # was misread as {2026, 5} (from the quoted date) and matched no queued item -> nothing
+    # applied. The HTML must be flattened to lines so only the typed reply is parsed.
+    m = EmailMessage()
+    m["From"] = "me@x.com"
+    m.set_content(_html_reply_body("apply all"), subtype="html")
+    assert inbox.parse_selection(inbox._text_body(m)) == "all"
+
+    m2 = EmailMessage()
+    m2["From"] = "me@x.com"
+    m2.set_content(_html_reply_body("apply 1,3"), subtype="html")
+    assert inbox.parse_selection(inbox._text_body(m2)) == {1, 3}
+
+
 # --- matches (the security gate) -----------------------------------------------------
 
 def _msg(from_addr: str, subject: str, body: str) -> EmailMessage:
@@ -119,6 +148,21 @@ def test_fetch_reply_matches_and_marks_seen(monkeypatch):
     assert reply is not None
     assert reply.selection == {1, 3}
     assert fake.stored and fake.stored[0][2] == "\\Seen"  # marked read
+
+
+def test_fetch_reply_parses_html_only_message(monkeypatch):
+    # End-to-end: an HTML-only reply must still yield the typed selection, not the quoted
+    # proposal's numbers. Mirrors what a phone client that omits text/plain sends.
+    token = "a1b2c3d4"
+    m = EmailMessage()
+    m["From"] = "me@x.com"
+    m["Subject"] = f"Re: proposal [FB {token}]"
+    m.set_content(_html_reply_body("apply all"), subtype="html")
+    fake = FakeIMAP([(b"1", m.as_bytes())])
+    monkeypatch.setattr(inbox.imaplib, "IMAP4_SSL", lambda host: fake)
+
+    reply = inbox.fetch_reply(_settings(), token)
+    assert reply is not None and reply.selection == "all"
 
 
 def test_fetch_reply_ignores_wrong_sender(monkeypatch):

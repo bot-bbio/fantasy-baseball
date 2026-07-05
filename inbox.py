@@ -17,6 +17,7 @@ tested with hand-built ``email.message`` objects -- no socket.
 from __future__ import annotations
 
 import email
+import html as html_lib
 import imaplib
 import re
 from dataclasses import dataclass
@@ -35,6 +36,26 @@ _QUOTE_MARKERS = (
 )
 _NEGATIVE = re.compile(r"\b(no|none|cancel|skip|stop|reject|decline|nope)\b")
 _AFFIRM = re.compile(r"\b(yes|yep|all|apply|confirm|confirmed|ok|okay|approve|accept|go)\b")
+
+# HTML tags that end a visual line; each becomes a newline so the reply keeps its structure.
+_BLOCK_BREAK = re.compile(r"(?i)<br\s*/?>|</(?:p|div|li|tr|h[1-6]|blockquote)>")
+# Opening <blockquote> wraps the quoted original in Gmail/iOS replies. Turning it into a
+# ``>``-prefixed line lets _strip_quoted cut the quote even when there's no "On ... wrote:".
+_BLOCKQUOTE_OPEN = re.compile(r"(?i)<blockquote[^>]*>")
+
+
+def _html_to_text(markup: str) -> str:
+    """Flatten an HTML email part to line-structured plain text.
+
+    Naively stripping tags (``<[^>]+>`` -> space) collapses the whole message onto one line,
+    which defeats quote-stripping and makes ``parse_selection`` read stray numbers out of the
+    quoted proposal. So we first turn line-ending tags into newlines and mark the quoted
+    ``<blockquote>`` with ``>``, then drop the remaining tags and unescape entities.
+    """
+    text = _BLOCKQUOTE_OPEN.sub("\n> ", markup)
+    text = _BLOCK_BREAK.sub("\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    return html_lib.unescape(text)
 
 
 @dataclass
@@ -83,14 +104,21 @@ def parse_selection(text: str | None) -> str | set[int] | None:
 
 
 def _text_body(msg: Message) -> str:
-    """Best-effort plain-text body of an email (prefers text/plain; crude HTML fallback)."""
+    """Best-effort plain-text body of an email.
+
+    Prefers a ``text/plain`` part. When only HTML is available -- multipart with no plain
+    part, or a single ``text/html`` message (some phone clients send these) -- convert it to
+    line-structured text via ``_html_to_text`` rather than a flat tag-strip, so the quoted
+    original stays separable from the user's typed reply.
+    """
     if msg.is_multipart():
         plain = _find_part(msg, "text/plain")
         if plain is not None:
             return plain
         html = _find_part(msg, "text/html")
-        return re.sub(r"<[^>]+>", " ", html) if html else ""
-    return _decode(msg)
+        return _html_to_text(html) if html else ""
+    text = _decode(msg)
+    return _html_to_text(text) if msg.get_content_type() == "text/html" else text
 
 
 def _find_part(msg: Message, content_type: str) -> str | None:
