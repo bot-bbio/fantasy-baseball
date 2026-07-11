@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 from html import escape
 
+import config
 from analysis.budget import AcquisitionBudget
 from pending import LINEUP, PendingQueue
 
@@ -34,6 +35,9 @@ _BADGE = ("display:inline-block;min-width:22px;height:22px;line-height:22px;"
 _MUTED = "color:#666;font-size:14px"
 _H2 = "font-size:15px;text-transform:uppercase;letter-spacing:.04em;color:#888;margin:22px 0 4px"
 _CMD = "background:#eee;border-radius:5px;padding:1px 6px;font-weight:700;white-space:nowrap"
+# Highlighted probable-start-date pill (amber = "when", distinct from the green score).
+_DATE = ("display:inline-block;background:#fff3cd;color:#7a5b00;border:1px solid #ffe69c;"
+         "border-radius:6px;padding:1px 8px;font-size:14px;font-weight:700;white-space:nowrap")
 
 
 def _moves_lines(item) -> list[str]:
@@ -47,6 +51,15 @@ def _held_note(budget: AcquisitionBudget, held_back: int) -> str | None:
     moves = "move" if budget.remaining == 1 else f"{budget.remaining} moves"
     return (f"Only the top {moves} fit today's add/drop budget; "
             f"{held_back} more upgrade(s) are listed below but not queued.")
+
+
+def _planahead_note(streams) -> str | None:
+    """Clarify that starts past the queueing horizon are for planning, not queued yet."""
+    horizon = config.STREAM_QUEUE_HORIZON_DAYS
+    if not any((s.evaluation.days_out or 0) > horizon for s in streams):
+        return None
+    edge = "today" if horizon <= 0 else "tomorrow" if horizon == 1 else f"{horizon} days out"
+    return f"Starts beyond {edge} are shown to plan ahead and aren't queued yet."
 
 
 # --------------------------------------------------------------------------------------
@@ -87,9 +100,15 @@ def _text(team_name, queue, plan, streams, hitters, when, budget, held_back) -> 
     if streams:
         for s in streams:
             e = s.evaluation
-            out += [f"* {e.player.name} ({e.player.pro_team}) - score {e.score:.0f}",
-                    f"    {e.summary}",
+            head = f"* {e.player.name} ({e.player.pro_team})"
+            if e.start_label:
+                head += f" - STARTS {e.start_label}"
+            out += [head,
+                    f"    score {e.score:.0f}, {e.summary}",
                     f"    drop {_drop_text(s)}, gain +{s.value_gain:.1f}"]
+        note = _planahead_note(streams)
+        if note:
+            out.append(f"  ({note})")
     else:
         out.append("(none worth streaming right now)")
     out.append("")
@@ -167,14 +186,19 @@ def _html(team_name, queue, plan, streams, hitters, when, budget, held_back) -> 
                     f'<a href="{escape(v)}" style="color:#2e7d32">{escape(k)}</a>'
                     for k, v in e.links.items())
                 links = f'<div style="{_MUTED};margin-top:4px">{joined}</div>'
+            date_pill = (f' <span style="{_DATE}">▶ {escape(e.start_label)}</span>'
+                         if e.start_label else "")
             h.append(
                 f'<div style="{_CARD}">'
                 f'<b>{escape(e.player.name)}</b> '
                 f'<span style="{_MUTED}">({escape(e.player.pro_team)})</span> '
-                f'&nbsp;<b style="color:#2e7d32">{e.score:.0f}</b>'
+                f'&nbsp;<b style="color:#2e7d32">{e.score:.0f}</b>{date_pill}'
                 f'<div style="{_MUTED};margin-top:2px">{escape(e.summary)}</div>'
                 f'<div style="margin-top:2px">drop {escape(_drop_text(s))} · '
                 f'gain <b>+{s.value_gain:.1f}</b></div>{links}</div>')
+        note = _planahead_note(streams)
+        if note:
+            h.append(f'<div style="{_MUTED};margin:6px 0">{escape(note)}</div>')
     else:
         h.append(f'<div style="{_MUTED}">None worth streaming right now.</div>')
 

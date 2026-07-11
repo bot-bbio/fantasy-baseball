@@ -10,12 +10,14 @@ from pending import ADD_DROP, LINEUP
 from tests.factories import hitter, pitcher
 
 
-def _stream_rec(add_id, add_name, drop_id, drop_name, *, gain=10.0):
+def _stream_rec(add_id, add_name, drop_id, drop_name, *, gain=10.0,
+                days_out=None, start_label="Today"):
     add = pitcher(add_id, add_name, team="LAD")
     drop = pitcher(drop_id, drop_name, team="NYY")
     ev = StreamerEvaluation(
         player=add, start_day="2026-06-22", opponent="Twins", opponent_ops=0.690,
         park_factor=100, talent=55, form=60, matchup=58, park=50, score=58.0,
+        start_label=start_label, days_out=days_out,
     )
     return StreamerRecommendation(ev, drop, gain, drop_is_streamer=False)
 
@@ -103,3 +105,28 @@ def test_at_most_one_hitter_is_proposed(tmp_path):
 
     assert len(_add_drops(queue)) == 1                      # second hitter never considered
     assert held == 0
+
+
+def test_far_out_start_is_not_queued(tmp_path):
+    """The rolling window surfaces plan-ahead starts, but only imminent ones are queued."""
+    plan = LineupPlan(assignments={})
+    streams = [_stream_rec(100, "Imminent", 1, "Weak SP", days_out=1, start_label="Tomorrow"),
+               _stream_rec(101, "FarOut", 2, "Weak SP2", days_out=4, start_label="Fri Jul 10")]
+
+    queue, _ = build_queue(plan, streams, [], _budget(None),
+                           path=tmp_path / "pending.json")
+
+    add_drops = _add_drops(queue)
+    assert len(add_drops) == 1                              # far-out start is not queued
+    assert "Imminent" in add_drops[0].description
+    assert all("FarOut" not in i.description for i in add_drops)
+
+
+def test_queued_stream_description_shows_start_date(tmp_path):
+    plan = LineupPlan(assignments={})
+    streams = [_stream_rec(100, "Stream Ace", 1, "Weak SP", days_out=0, start_label="Today")]
+
+    queue, _ = build_queue(plan, streams, [], _budget(None),
+                           path=tmp_path / "pending.json")
+
+    assert "starts Today" in _add_drops(queue)[0].description

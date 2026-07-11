@@ -21,13 +21,14 @@ def _budget(remaining):
                              period_used=0, period_limit=remaining, period_label="today")
 
 
-def _stream_rec():
+def _stream_rec(*, start_label="Tomorrow", days_out=1):
     add = pitcher(100, "Andre Pallante", team="StL")
     drop = pitcher(1, "Nick Martinez", team="Cin")
     ev = StreamerEvaluation(
         player=add, start_day="2026-06-22", opponent="Twins", opponent_ops=0.690,
         park_factor=100, talent=55, form=60, matchup=58, park=50, score=58.0,
         links={"FanGraphs": "https://example.com/fg"},
+        start_label=start_label, days_out=days_out,
     )
     return StreamerRecommendation(ev, drop, 19.4, drop_is_streamer=False)
 
@@ -105,6 +106,31 @@ def test_two_way_prompt_appears_in_email():
     assert "Shohei Ohtani is pitching today" in text
     assert "Shohei Ohtani is pitching today" in html
     assert "add a hitter" in text.lower()
+
+
+def test_start_date_is_highlighted():
+    """The probable start date shows in both parts, as an amber pill in the HTML."""
+    queue = _queue((ADD_DROP, "ADD Andre Pallante (StL) / DROP Nick Martinez", {}))
+    text, html = render_email("T", queue, LineupPlan(assignments={}),
+                              [_stream_rec()], [], WHEN, _budget(None), held_back=0)
+    assert "Tomorrow" in text
+    assert "Tomorrow" in html
+    assert "#fff3cd" in html                     # the amber date-pill background rendered
+
+
+def test_planahead_note_only_for_starts_beyond_horizon():
+    plan = LineupPlan(assignments={})
+    imminent = render_email("T", PendingQueue.new(path=None), plan,
+                            [_stream_rec(start_label="Tomorrow", days_out=1)], [],
+                            WHEN, _budget(None), held_back=0)
+    for part in imminent:
+        assert "plan ahead" not in part          # today/tomorrow starts: no note
+
+    far = render_email("T", PendingQueue.new(path=None), plan,
+                       [_stream_rec(start_label="Fri Jul 10", days_out=4)], [],
+                       WHEN, _budget(None), held_back=0)
+    for part in far:
+        assert "plan ahead" in part               # a start days out is flagged as plan-ahead
 
 
 def test_html_escapes_special_characters():

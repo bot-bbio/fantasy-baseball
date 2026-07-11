@@ -211,3 +211,76 @@ def test_skill_score_uses_advanced_metrics():
     good = streaming._skill_score({"SIERA": 3.0, "KBB": 0.20, "WHIP": 1.05})
     bad = streaming._skill_score({"SIERA": 4.6, "KBB": 0.07, "WHIP": 1.40})
     assert good > bad
+
+
+def test_start_label_relative_then_absolute():
+    assert streaming._start_label("2026-07-05", "2026-07-05") == "Today"
+    assert streaming._start_label("2026-07-06", "2026-07-05") == "Tomorrow"
+    far = streaming._start_label("2026-07-08", "2026-07-05")
+    assert "Jul 8" in far and "Today" not in far and "Tomorrow" not in far
+    assert streaming._start_label("2026-07-08", None).endswith("Jul 8")  # absolute w/o a ref date
+    assert streaming._start_label("", "2026-07-05") == "TBD"             # unparseable -> TBD
+
+
+def test_days_out_counts_whole_days():
+    assert streaming._days_out("2026-07-08", "2026-07-05") == 3
+    assert streaming._days_out("2026-07-05", "2026-07-05") == 0
+    assert streaming._days_out("2026-07-05", None) is None
+
+
+def test_summary_omits_raw_iso_date():
+    """The start date is surfaced as a highlighted label, not buried in the summary."""
+    day = _one_game_day()
+    offense = {136: 0.620, 147: 0.760}
+    ace = pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                  stats={"ERA": 3.4, "WHIP": 1.15, "K": 180, "OUTS": 510})
+    ev = streaming.evaluate(ace, day, offense, LG_OPS, today_date=day.date)
+    assert "2026-" not in ev.summary
+    assert ev.start_label == "Today" and ev.days_out == 0
+
+
+def _yanks_day(date: str, ace: bool = False) -> DaySchedule:
+    """NYY (147) home vs Mariners (136) on `date`; the ace is probable only when `ace`."""
+    return DaySchedule(
+        date=date, playing_team_ids={147, 136},
+        probable_pitchers={147: "Stream Ace"} if ace else {},
+        opponents={147: 136, 136: 147}, home_teams={147},
+        team_names={147: "Yankees", 136: "Mariners"},
+    )
+
+
+def test_recommend_highlights_start_date_across_rolling_window():
+    """A start several days out is surfaced with its absolute label and correct days_out."""
+    offense = {136: 0.620, 147: 0.760}
+    ace = pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                  stats={"ERA": 3.0, "WHIP": 1.05, "K": 200, "OUTS": 540})
+    droppable = pitcher(1, "Weak SP", team="Atl", slots=("SP", "P"),
+                        stats={"ERA": 5.5, "WHIP": 1.55, "K": 70, "OUTS": 430})
+    schedules = [_yanks_day("2026-07-05"), _yanks_day("2026-07-06"),
+                 _yanks_day("2026-07-07", ace=True)]          # probable only on day 3
+
+    recs = streaming.recommend_streamers([droppable], [ace], schedules, offense)
+
+    assert len(recs) == 1
+    ev = recs[0].evaluation
+    assert ev.start_day == "2026-07-07"
+    assert ev.days_out == 2
+    assert "Jul 7" in ev.start_label                          # absolute label for a plan-ahead start
+
+
+def test_recommend_marks_today_start():
+    day = _one_game_day()                                     # ace probable this same day
+    offense = {136: 0.620, 147: 0.760}
+    roster = [pitcher(1, "Droppable", team="Atl", slots=("SP", "P"),
+                      stats={"ERA": 5.0, "WHIP": 1.5, "K": 80, "OUTS": 450})]
+    fas = [pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                   stats={"ERA": 3.2, "WHIP": 1.10, "K": 190, "OUTS": 520})]
+
+    recs = streaming.recommend_streamers(roster, fas, [day], offense)
+
+    assert recs[0].evaluation.start_label == "Today"
+    assert recs[0].evaluation.days_out == 0
+
+
+def test_recommend_empty_schedule_returns_nothing():
+    assert streaming.recommend_streamers([], [], [], {}) == []

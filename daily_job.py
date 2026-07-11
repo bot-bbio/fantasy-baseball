@@ -47,7 +47,8 @@ def _streamer_payload(rec) -> dict | None:
         "add_id": add.player_id, "add_name": add.name, "add_team": add.pro_team,
         "drop_id": rec.drop.player_id, "drop_name": rec.drop.name,
         "drop_is_streamer": rec.drop_is_streamer, "is_streamer_add": True,
-        "start_day": rec.evaluation.start_day, "score": round(rec.evaluation.score, 1),
+        "start_day": rec.evaluation.start_day, "start_label": rec.evaluation.start_label,
+        "days_out": rec.evaluation.days_out, "score": round(rec.evaluation.score, 1),
     }
 
 
@@ -62,20 +63,35 @@ def _hitter_payload(rec) -> dict | None:
     }
 
 
+def _is_queueable_stream(rec) -> bool:
+    """True if a streamer's start is imminent enough to queue for approval *now*.
+
+    The rolling report surfaces starts several days out for planning, but we only queue an
+    add whose start falls within ``STREAM_QUEUE_HORIZON_DAYS`` (today/tomorrow) so we never
+    add a pitcher days before he throws -- burning a roster slot and an add/drop early. A
+    missing ``days_out`` (unknown date) is treated as imminent to preserve prior behaviour.
+    """
+    days_out = rec.evaluation.days_out
+    return days_out is None or days_out <= config.STREAM_QUEUE_HORIZON_DAYS
+
+
 def _executable_add_drops(streams, hitters) -> list[tuple[str, dict]]:
     """All proposed add/drops that have an executable payload, in priority order.
 
     Streaming pitchers come first: a start is date-sensitive (a great matchup today is
     gone tomorrow), whereas a hitter upgrade keeps. So when only a few moves fit the
-    league's add/drop budget, the streams win the slot.
+    league's add/drop budget, the streams win the slot. Only imminent starts are queued
+    (see ``_is_queueable_stream``); further-out starts remain in the report to plan ahead.
     """
     items: list[tuple[str, dict]] = []
-    for rec in streams[:MAX_STREAMERS]:
+    queueable = [rec for rec in streams if _is_queueable_stream(rec)]
+    for rec in queueable[:MAX_STREAMERS]:
         payload = _streamer_payload(rec)
         if payload is None:
             continue
         tag = "recycles streamer slot" if rec.drop_is_streamer else "opens NEW streamer slot"
-        items.append((f"ADD {payload['add_name']} ({payload['add_team']}) / "
+        when = f" [starts {payload['start_label']}]" if payload.get("start_label") else ""
+        items.append((f"ADD {payload['add_name']} ({payload['add_team']}){when} / "
                       f"DROP {payload['drop_name']} - stream, {tag}", payload))
     for rec in hitters[:MAX_HITTERS]:
         payload = _hitter_payload(rec)
@@ -149,17 +165,20 @@ def _render(team_name, queue, plan, streams, hitters, when, budget, held_back) -
                 "(no one available today).", ""]
 
     out += ["## Streaming pitchers (rationale)", "",
-            "_Score = talent + recent form + matchup + park (+ two-start bonus)._", ""]
+            "_Score = talent + recent form + matchup + park (+ two-start bonus). "
+            "**Start** = highlighted probable start date across the rolling look-ahead._", ""]
     if streams:
-        out += ["| Add | Team | Score | Talent | Form | Matchup | Drop | Gain |",
-                "|---|---|---|---|---|---|---|---|"]
+        out += ["| Add | Team | Start | Score | Talent | Form | Matchup | Drop | Gain |",
+                "|---|---|---|---|---|---|---|---|---|"]
         for s in streams:
             e = s.evaluation
             out.append(
-                f"| {e.player.name} | {e.player.pro_team} | {e.score:.0f} | "
-                f"{e.talent:.0f} | {e.form:.0f} | {e.summary} | "
+                f"| {e.player.name} | {e.player.pro_team} | **{e.start_label or e.start_day}** | "
+                f"{e.score:.0f} | {e.talent:.0f} | {e.form:.0f} | {e.summary} | "
                 f"{_drop_cell(s)} | {s.value_gain:.1f} |"
             )
+        if _has_planahead(streams):
+            out += ["", f"> {_planahead_note()}"]
         out += ["", "**Verify the model** (research links):"]
         for s in streams:
             if s.evaluation.links:
@@ -188,6 +207,22 @@ def _drop_cell(rec) -> str:
     return f"{rec.drop.name} ({tag})"
 
 
+def _horizon_edge() -> str:
+    """Word for the last day a start may fall on and still be queued now."""
+    h = config.STREAM_QUEUE_HORIZON_DAYS
+    return "today" if h <= 0 else "tomorrow" if h == 1 else f"{h} days out"
+
+
+def _planahead_note() -> str:
+    return (f"Starts beyond {_horizon_edge()} are shown to plan ahead and aren't queued "
+            "yet; only imminent starts are proposed for approval above.")
+
+
+def _has_planahead(streams) -> bool:
+    """True if any surfaced streamer starts past the queueing horizon (plan-ahead only)."""
+    return any((s.evaluation.days_out or 0) > config.STREAM_QUEUE_HORIZON_DAYS for s in streams)
+
+
 def _write_report(text: str, day: dt.date) -> str:
     config.REPORTS_DIR.mkdir(exist_ok=True)
     path = config.REPORTS_DIR / f"{day:%Y-%m-%d}.md"
@@ -208,7 +243,8 @@ def main() -> int:
         today = config.local_today(settings.timezone)
         schedule = mlb_schedule.fetch_day(today)
         plan, _ = pipeline.build_lineup_plan(reader, schedule)
-        schedules = pipeline.upcoming_schedules(settings.timezone, days=2)
+        schedules = pipeline.upcoming_schedules(
+            settings.timezone, days=config.STREAM_LOOKAHEAD_DAYS)
         streams, hitters = pipeline.gather_waiver_recs(reader, schedules)
         budget = _budget(reader)
         team_name = reader.my_team().team_name

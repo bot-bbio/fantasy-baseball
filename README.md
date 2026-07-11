@@ -41,6 +41,12 @@ Free-agent starters are scored, not just ranked by projection. Each upcoming sta
 `gain` is the score minus the skill of the weakest arm you'd drop, so only genuine
 upgrades surface. Weights/constants live at the top of [analysis/streaming.py](analysis/streaming.py).
 
+Recommendations roll over a **few-day look-ahead window** (`STREAM_LOOKAHEAD_DAYS`, default 5),
+and each candidate shows a **highlighted probable start date** ("Today" / "Tomorrow" / "Wed Jul 8").
+Only imminent starts (within `STREAM_QUEUE_HORIZON_DAYS`, default today/tomorrow) are queued for
+approval; starts further out are surfaced to plan ahead but not auto-added, so you never pick up a
+pitcher days before he throws.
+
 ESPN has no official API. The community library reliably *reads* a league but can't
 *write*, so writes are a direct POST to ESPN's transactions endpoint. The same
 `espn_s2`/`SWID` cookies authenticate both the read and write hosts — so once cookies are
@@ -125,8 +131,8 @@ python cli.py status            # record, current matchup, standings
 python cli.py team              # roster with today's availability + projections
 python cli.py lineup            # show optimal moves (dry run — nothing submitted)
 python cli.py lineup --execute  # apply the moves on ESPN
-python cli.py waivers           # streaming + best-available recommendations
-python cli.py waivers --days 3  # widen the look-ahead window for starts
+python cli.py waivers           # streaming + best-available recs (5-day rolling look-ahead)
+python cli.py waivers --days 3  # narrow/widen the rolling look-ahead window for starts
 
 python cli.py pending           # show queued, awaiting-confirmation changes
 python cli.py apply --all       # apply the whole queue (or --only 1,3) from a computer

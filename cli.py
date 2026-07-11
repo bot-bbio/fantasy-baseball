@@ -144,12 +144,13 @@ def cmd_waivers(args: argparse.Namespace) -> int:
     print("Streaming pitchers (model: talent + form + matchup + park):")
     if streams:
         rows = [[s.evaluation.player.name, s.evaluation.player.pro_team,
+                 s.evaluation.start_label or s.evaluation.start_day,
                  round(s.evaluation.score), round(s.evaluation.talent),
                  round(s.evaluation.form), s.evaluation.summary,
                  _drop_label(s), round(s.value_gain, 1)]
                 for s in streams]
-        print(tabulate(rows, headers=["Add", "Team", "Score", "Tal", "Form", "Matchup",
-                                      "Drop", "Gain"], tablefmt="simple"))
+        print(tabulate(rows, headers=["Add", "Team", "Start", "Score", "Tal", "Form",
+                                      "Matchup", "Drop", "Gain"], tablefmt="simple"))
         print("  (research deep-links are included in the daily report)")
         print("  Drop key: 'streamer slot' = recycles a tracked streamer; "
               "'NEW slot' = would become your streamer slot.")
@@ -315,7 +316,8 @@ def main(argv: list[str] | None = None) -> int:
     p_lineup.set_defaults(func=cmd_lineup)
 
     p_waivers = sub.add_parser("waivers", help="streaming + best-available recs")
-    p_waivers.add_argument("--days", type=int, default=2, help="look-ahead days for starts")
+    p_waivers.add_argument("--days", type=int, default=config.STREAM_LOOKAHEAD_DAYS,
+                           help="rolling look-ahead window (days) for probable starts")
     p_waivers.add_argument("--size", type=int, default=75, help="free-agent pool size")
     p_waivers.set_defaults(func=cmd_waivers)
 

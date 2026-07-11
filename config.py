@@ -25,6 +25,14 @@ COOKIES_FILE = AUTH_DIR / "cookies.json"       # {"espn_s2": ..., "swid": ...}
 # Generated output.
 REPORTS_DIR = PROJECT_ROOT / "reports"
 
+# Streaming look-ahead. STREAM_LOOKAHEAD_DAYS is the rolling window of probable starts we
+# surface (today + the next few days) so upcoming matchups are visible for planning.
+# STREAM_QUEUE_HORIZON_DAYS is how many days out a start may be and still be queued for
+# one-click approval *now* (0 = today, 1 = today/tomorrow); starts beyond it are shown to
+# plan ahead but not auto-queued, so we never add a pitcher days before he actually throws.
+STREAM_LOOKAHEAD_DAYS = 5
+STREAM_QUEUE_HORIZON_DAYS = 1
+
 # Local, git-ignored persistent state (streamer-slot tracking, etc.).
 STATE_DIR = PROJECT_ROOT / ".state"
 STREAMERS_FILE = STATE_DIR / "streamers.json"

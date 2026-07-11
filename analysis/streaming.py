@@ -174,10 +174,40 @@ def _skill_baseline(player: RosterPlayer, research, k_weight: float = 1.0) -> fl
     return statistics.fmean(parts) if parts else 50.0
 
 
+def _days_out(start_iso: str, today_iso: str | None) -> int | None:
+    """Whole days from ``today_iso`` to the probable-start date; None if either is unparseable."""
+    if not today_iso:
+        return None
+    try:
+        return (dt.date.fromisoformat(start_iso) - dt.date.fromisoformat(today_iso)).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _start_label(start_iso: str, today_iso: str | None) -> str:
+    """A highlighted, human-friendly probable-start date.
+
+    Imminent starts read as ``Today`` / ``Tomorrow`` (what you act on now); anything further
+    out in the rolling window shows an absolute weekday + date (``Wed Jul 8``) so a few days
+    of upcoming starts stay legible at a glance. ``start.day`` is used directly to avoid a
+    platform-specific ``%-d``/``%#d`` (leading-zero) strftime directive.
+    """
+    try:
+        start = dt.date.fromisoformat(start_iso)
+    except (ValueError, TypeError):
+        return start_iso or "TBD"
+    delta = _days_out(start_iso, today_iso)
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tomorrow"
+    return f"{start:%a %b} {start.day}"
+
+
 @dataclass
 class StreamerEvaluation:
     player: RosterPlayer
-    start_day: str
+    start_day: str                       # ISO date of the probable start (for payloads/logs)
     opponent: str
     opponent_ops: float | None
     park_factor: int
@@ -188,13 +218,17 @@ class StreamerEvaluation:
     score: float
     two_start: bool = False
     links: dict = field(default_factory=dict)
+    start_label: str = ""                # highlighted, human-friendly date ("Today", "Wed Jul 8")
+    days_out: int | None = None          # whole days until the start (0 = today), None if unknown
 
     @property
     def summary(self) -> str:
+        """Matchup/park rationale. The start *date* is surfaced separately (``start_label``)
+        so renderers can highlight it rather than bury it in this line."""
         opp = f"@ {self.opponent}" if self.opponent else "@ TBD"
         if self.opponent_ops is not None:
             opp += f" ({self.opponent_ops:.3f} OPS)"
-        text = f"{self.start_day} {opp}, {park_factors.describe(self.park_factor)} park"
+        text = f"{opp}, {park_factors.describe(self.park_factor)} park"
         if self.two_start:
             text += " - 2 starts"
         return text
@@ -204,7 +238,7 @@ def evaluate(
     player: RosterPlayer, day: DaySchedule, offense: dict[int, float], league_ops: float,
     *, research=None, opp_ops: float | None = None,
     scored_categories: tuple[str, ...] = (), two_start: bool = False,
-    links: dict | None = None,
+    links: dict | None = None, today_date: str | None = None,
 ) -> StreamerEvaluation:
     kw = _k_weight(scored_categories)
     talent = _skill_score(_talent_metrics(player, research), k_weight=kw)
@@ -227,6 +261,8 @@ def evaluate(
         opponent_ops=opp_ops, park_factor=factor,
         talent=talent, form=form, matchup=matchup, park=park, score=score,
         two_start=two_start, links=links or {},
+        start_label=_start_label(day.date, today_date),
+        days_out=_days_out(day.date, today_date),
     )
 
 
@@ -289,10 +325,15 @@ def recommend_streamers(
     (those above the floor) are ever offered as drops, so a streaming add can never
     take the roster below ``min_relievers`` dedicated relief pitchers.
     """
+    if not schedules:
+        return []
     league_ops = league_average_ops(offense)
     k_weight = _k_weight(scored_categories)
+    today = schedules[0]
+    today_iso = today.date  # reference date for the human-friendly "Today"/"Tomorrow" labels
 
-    # Two-start = probable on 2+ days in the window.
+    # Two-start = probable on 2+ days in the window (a wider window catches genuine two-start
+    # weeks the old two-day view missed).
     start_counts = {
         fa.player_id: sum(1 for d in schedules if is_probable_today(fa, d))
         for fa in free_agents
@@ -311,11 +352,11 @@ def recommend_streamers(
             scored_categories=scored_categories,
             two_start=start_counts.get(fa.player_id, 0) >= 2,
             links=research_api.deep_links(fa.name) if research is not None else {},
+            today_date=today_iso,
         )
         evaluations.append(evaluation)
     evaluations.sort(key=lambda e: e.score, reverse=True)
 
-    today = schedules[0]
     candidates = [p for p in roster if p.is_pitcher and not is_probable_today(p, today)]
     by_skill = lambda p: _skill_baseline(p, research, k_weight)  # noqa: E731
 
