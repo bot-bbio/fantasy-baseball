@@ -21,16 +21,18 @@ def _budget(remaining):
                              period_used=0, period_limit=remaining, period_label="today")
 
 
-def _stream_rec(*, start_label="Tomorrow", days_out=1):
+def _stream_rec(*, start_label="Tomorrow", days_out=1, gain=19.4, is_upgrade=True,
+                has_drop=True, staff_gain=8.0):
     add = pitcher(100, "Andre Pallante", team="StL")
-    drop = pitcher(1, "Nick Martinez", team="Cin")
+    drop = pitcher(1, "Nick Martinez", team="Cin") if has_drop else None
     ev = StreamerEvaluation(
         player=add, start_day="2026-06-22", opponent="Twins", opponent_ops=0.690,
         park_factor=100, talent=55, form=60, matchup=58, park=50, score=58.0,
         links={"FanGraphs": "https://example.com/fg"},
         start_label=start_label, days_out=days_out,
     )
-    return StreamerRecommendation(ev, drop, 19.4, drop_is_streamer=False)
+    return StreamerRecommendation(ev, drop, gain, drop_is_streamer=False,
+                                  is_upgrade=is_upgrade, staff_gain=staff_gain)
 
 
 def _hitter_rec():
@@ -131,6 +133,25 @@ def test_planahead_note_only_for_starts_beyond_horizon():
                        WHEN, _budget(None), held_back=0)
     for part in far:
         assert "plan ahead" in part               # a start days out is flagged as plan-ahead
+
+
+def test_landscape_shows_upgrades_and_scouting_options():
+    """The whole available landscape renders: upgrades are marked and show their swap,
+    a worse-than-your-arm option shows its negative gain, and an option with no open drop
+    is shown for reference instead of being hidden."""
+    upgrade = _stream_rec(is_upgrade=True, gain=12.0, staff_gain=6.0)  # beats the arm it'd drop
+    below = _stream_rec(is_upgrade=False, gain=-4.0, staff_gain=-9.0)  # has a drop, but worse
+    no_slot = _stream_rec(is_upgrade=False, has_drop=False, staff_gain=3.0)  # no disposable arm
+    plan = LineupPlan(assignments={})
+    text, html = render_email("T", PendingQueue.new(path=None), plan,
+                              [upgrade, below, no_slot], [], WHEN, _budget(None), held_back=0)
+
+    assert "UPGRADE" in text and "upgrade" in html          # upgrade tag present
+    assert "+12.0" in text and "+12.0" in html              # upgrade slot gain, signed
+    assert "-4.0" in text and "-4.0" in html                # below-arm negative slot gain, signed
+    assert "no open drop" in text and "no open drop" in html  # scouting-only option surfaced
+    assert "vs staff" in text and "vs staff" in html        # staff-value metric shown too
+    assert "+6.0" in text and "+6.0" in html                # staff gain, signed
 
 
 def test_html_escapes_special_characters():

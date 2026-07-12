@@ -64,13 +64,17 @@ def _hitter_payload(rec) -> dict | None:
 
 
 def _is_queueable_stream(rec) -> bool:
-    """True if a streamer's start is imminent enough to queue for approval *now*.
+    """True if a streamer is worth queueing for approval *now*.
 
-    The rolling report surfaces starts several days out for planning, but we only queue an
-    add whose start falls within ``STREAM_QUEUE_HORIZON_DAYS`` (today/tomorrow) so we never
-    add a pitcher days before he throws -- burning a roster slot and an add/drop early. A
-    missing ``days_out`` (unknown date) is treated as imminent to preserve prior behaviour.
+    Two gates. First, it must be a genuine ``is_upgrade`` -- the report shows the whole
+    landscape of available starts (including non-upgrades, for scouting), but only real
+    upgrades are ever proposed as moves. Second, the start must be imminent -- within
+    ``STREAM_QUEUE_HORIZON_DAYS`` (today/tomorrow) -- so we never add a pitcher days before
+    he throws, burning a roster slot and an add/drop early. A missing ``days_out`` (unknown
+    date) is treated as imminent to preserve prior behaviour.
     """
+    if not rec.is_upgrade:
+        return False
     days_out = rec.evaluation.days_out
     return days_out is None or days_out <= config.STREAM_QUEUE_HORIZON_DAYS
 
@@ -164,18 +168,21 @@ def _render(team_name, queue, plan, streams, hitters, when, budget, held_back) -
         out += [f"> ! Could not fill: {', '.join(plan.empty_slots)} "
                 "(no one available today).", ""]
 
-    out += ["## Streaming pitchers (rationale)", "",
-            "_Score = talent + recent form + matchup + park (+ two-start bonus). "
-            "**Start** = highlighted probable start date across the rolling look-ahead._", ""]
+    out += ["## Streaming options (available landscape)", "",
+            "_Every free-agent starter with an upcoming start, ranked by score (50 = league "
+            "average). **✓** marks a genuine upgrade -- it beats the disposable arm you'd swap "
+            "for it. **vs Slot** = score minus that arm (blank when none is free); **vs Staff** "
+            "= score minus your rotation's median skill (a fixed staff-value yardstick). "
+            "**Start** is the highlighted probable date._", ""]
     if streams:
-        out += ["| Add | Team | Start | Score | Talent | Form | Matchup | Drop | Gain |",
+        out += ["| | Add | Team | Start | Score | Matchup | Drop | vs Slot | vs Staff |",
                 "|---|---|---|---|---|---|---|---|---|"]
         for s in streams:
             e = s.evaluation
             out.append(
-                f"| {e.player.name} | {e.player.pro_team} | **{e.start_label or e.start_day}** | "
-                f"{e.score:.0f} | {e.talent:.0f} | {e.form:.0f} | {e.summary} | "
-                f"{_drop_cell(s)} | {s.value_gain:.1f} |"
+                f"| {'✓' if s.is_upgrade else ''} | {e.player.name} | {e.player.pro_team} | "
+                f"**{e.start_label or e.start_day}** | {e.score:.0f} | {e.summary} | "
+                f"{_drop_cell(s)} | {_slot_cell(s)} | {_staff_cell(s)} |"
             )
         if _has_planahead(streams):
             out += ["", f"> {_planahead_note()}"]
@@ -185,7 +192,7 @@ def _render(team_name, queue, plan, streams, hitters, when, budget, held_back) -
                 joined = " · ".join(f"[{k}]({v})" for k, v in s.evaluation.links.items())
                 out.append(f"- {s.evaluation.player.name}: {joined}")
     else:
-        out += ["_None worth streaming right now._"]
+        out += ["_No available starters have an upcoming start in the window._"]
     out += [""]
 
     out += ["## Best available hitters (rationale)", ""]
@@ -200,11 +207,22 @@ def _render(team_name, queue, plan, streams, hitters, when, budget, held_back) -
 
 
 def _drop_cell(rec) -> str:
-    """Drop cell for the report, flagging whether it recycles the streamer slot."""
+    """The disposable arm this add would swap in for, or '-' when no disposable arm is free
+    for it this run (a scouting-only option, ranked into the landscape by its score)."""
     if rec.drop is None:
         return "-"
     tag = "streamer slot" if rec.drop_is_streamer else "NEW slot"
     return f"{rec.drop.name} ({tag})"
+
+
+def _slot_cell(rec) -> str:
+    """Signed gain over the disposable arm you'd swap for it, shown only when one is free."""
+    return f"{rec.slot_gain:+.1f}" if rec.drop is not None else "-"
+
+
+def _staff_cell(rec) -> str:
+    """Signed gain over your rotation's median skill (a fixed staff-value yardstick)."""
+    return f"{rec.staff_gain:+.1f}" if rec.staff_gain is not None else "-"
 
 
 def _horizon_edge() -> str:
@@ -231,6 +249,7 @@ def _write_report(text: str, day: dt.date) -> str:
 
 
 def main() -> int:
+    config.use_utf8_console()  # reports carry ✓/⚾/· glyphs a cp1252 console can't print
     now = dt.datetime.now()
     try:
         settings = config.get_settings(require_cookies=True)

@@ -38,14 +38,23 @@ Free-agent starters are scored, not just ranked by projection. Each upcoming sta
 - **matchup** (30%) — opponent team OPS (weaker lineup → higher)
 - **park** (15%) — run park factor of the game's venue (pitcher park → higher)
 
-`gain` is the score minus the skill of the weakest arm you'd drop, so only genuine
-upgrades surface. Weights/constants live at the top of [analysis/streaming.py](analysis/streaming.py).
+The report shows the **whole available landscape** — every free-agent starter with an upcoming
+start, ranked by score — not just clear upgrades. Two gains are reported per option:
+
+- **vs Slot** — score minus the specific disposable arm you'd swap for it (the actionable swap
+  value; blank when no disposable arm is free this run).
+- **vs Staff** — score minus your rotation's *median* skill (a fixed staff-value yardstick,
+  comparable across rows regardless of which arm happens to be droppable).
+
+A **✓** marks a genuine upgrade (it beats the arm you'd drop). Options with no open disposable arm
+are still listed for reference by score + vs Staff. Weights/constants live at the top of
+[analysis/streaming.py](analysis/streaming.py).
 
 Recommendations roll over a **few-day look-ahead window** (`STREAM_LOOKAHEAD_DAYS`, default 5),
 and each candidate shows a **highlighted probable start date** ("Today" / "Tomorrow" / "Wed Jul 8").
-Only imminent starts (within `STREAM_QUEUE_HORIZON_DAYS`, default today/tomorrow) are queued for
-approval; starts further out are surfaced to plan ahead but not auto-added, so you never pick up a
-pitcher days before he throws.
+Only imminent upgrades (within `STREAM_QUEUE_HORIZON_DAYS`, default today/tomorrow) are queued for
+approval; everything else — further-out starts and scouting-only options — is surfaced to plan
+ahead but not auto-added, so you never pick up a pitcher days before he throws.
 
 ESPN has no official API. The community library reliably *reads* a league but can't
 *write*, so writes are a direct POST to ESPN's transactions endpoint. The same

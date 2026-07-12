@@ -11,7 +11,7 @@ from tests.factories import hitter, pitcher
 
 
 def _stream_rec(add_id, add_name, drop_id, drop_name, *, gain=10.0,
-                days_out=None, start_label="Today"):
+                days_out=None, start_label="Today", is_upgrade=True):
     add = pitcher(add_id, add_name, team="LAD")
     drop = pitcher(drop_id, drop_name, team="NYY")
     ev = StreamerEvaluation(
@@ -19,7 +19,7 @@ def _stream_rec(add_id, add_name, drop_id, drop_name, *, gain=10.0,
         park_factor=100, talent=55, form=60, matchup=58, park=50, score=58.0,
         start_label=start_label, days_out=days_out,
     )
-    return StreamerRecommendation(ev, drop, gain, drop_is_streamer=False)
+    return StreamerRecommendation(ev, drop, gain, drop_is_streamer=False, is_upgrade=is_upgrade)
 
 
 def _hitter_rec(add_id, add_name, drop_id, drop_name, *, gain=5.0):
@@ -130,3 +130,15 @@ def test_queued_stream_description_shows_start_date(tmp_path):
                            path=tmp_path / "pending.json")
 
     assert "starts Today" in _add_drops(queue)[0].description
+
+
+def test_non_upgrade_stream_is_not_queued(tmp_path):
+    """Scouting-only options (shown in the landscape) are never proposed as moves."""
+    plan = LineupPlan(assignments={})
+    streams = [_stream_rec(100, "Scouting Only", 1, "Weak SP", days_out=0, is_upgrade=False)]
+
+    queue, held = build_queue(plan, streams, [], _budget(None),
+                              path=tmp_path / "pending.json")
+
+    assert _add_drops(queue) == []
+    assert held == 0

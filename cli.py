@@ -141,21 +141,24 @@ def cmd_waivers(args: argparse.Namespace) -> int:
     except Exception:
         pass  # informational only; never block the recommendations on it
 
-    print("Streaming pitchers (model: talent + form + matchup + park):")
+    print("Available streaming starters (landscape; model: talent + form + matchup + park):")
     if streams:
-        rows = [[s.evaluation.player.name, s.evaluation.player.pro_team,
+        rows = [["✓" if s.is_upgrade else "", s.evaluation.player.name,
+                 s.evaluation.player.pro_team,
                  s.evaluation.start_label or s.evaluation.start_day,
-                 round(s.evaluation.score), round(s.evaluation.talent),
-                 round(s.evaluation.form), s.evaluation.summary,
-                 _drop_label(s), round(s.value_gain, 1)]
+                 round(s.evaluation.score), s.evaluation.summary,
+                 _drop_label(s), _slot_label(s), _staff_label(s)]
                 for s in streams]
-        print(tabulate(rows, headers=["Add", "Team", "Start", "Score", "Tal", "Form",
-                                      "Matchup", "Drop", "Gain"], tablefmt="simple"))
+        print(tabulate(rows, headers=["", "Add", "Team", "Start", "Score", "Matchup",
+                                      "Drop", "vs Slot", "vs Staff"], tablefmt="simple"))
         print("  (research deep-links are included in the daily report)")
+        print("  '✓' = genuine upgrade (queue-worthy); unmarked rows are shown for reference.")
+        print("  'vs Slot' = score vs the arm you'd drop; 'vs Staff' = score vs your "
+              "rotation's median skill.")
         print("  Drop key: 'streamer slot' = recycles a tracked streamer; "
               "'NEW slot' = would become your streamer slot.")
     else:
-        print("  (none worth streaming right now)")
+        print("  (no available starters have an upcoming start)")
 
     print("\nBest available hitters (upgrades over your weakest bats):")
     if hitters:
@@ -172,11 +175,22 @@ def cmd_waivers(args: argparse.Namespace) -> int:
 
 
 def _drop_label(rec) -> str:
-    """Human-readable drop cell that flags whether it recycles the streamer slot."""
+    """The disposable arm this add would swap in for, or '-' when no disposable arm is free
+    for it this run (a scouting-only option, ranked into the landscape by score)."""
     if rec.drop is None:
         return "-"
     tag = "streamer slot" if rec.drop_is_streamer else "NEW slot"
     return f"{rec.drop.name} ({tag})"
+
+
+def _slot_label(rec):
+    """Signed gain over the disposable arm you'd swap for it, shown only when one is free."""
+    return round(rec.slot_gain, 1) if rec.drop is not None else "-"
+
+
+def _staff_label(rec):
+    """Signed gain over your rotation's median skill (a fixed staff-value yardstick)."""
+    return round(rec.staff_gain, 1) if rec.staff_gain is not None else "-"
 
 
 def _maybe_int(token: str) -> int | None:
@@ -305,6 +319,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    config.use_utf8_console()  # tables carry ✓/· glyphs a cp1252 console can't print
     parser = argparse.ArgumentParser(description="ESPN fantasy baseball assistant")
     sub = parser.add_subparsers(dest="command", required=True)
 

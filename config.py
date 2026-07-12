@@ -124,6 +124,19 @@ def save_cookies(espn_s2: str, swid: str) -> None:
     )
 
 
+def use_utf8_console() -> None:
+    """Force stdout/stderr to UTF-8 so reports with non-ASCII glyphs (✓, ⚾, ·) never crash a
+    `print`. Windows consoles/redirected files default to cp1252, which can't encode them;
+    the saved report and emails are already written as explicit UTF-8. A no-op where the
+    streams don't support reconfigure (e.g. already-wrapped test capture)."""
+    import sys
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def local_today(timezone: str) -> dt.date:
     """Today's date in the configured timezone (falls back to system local)."""
     try:

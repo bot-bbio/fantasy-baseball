@@ -38,6 +38,9 @@ _CMD = "background:#eee;border-radius:5px;padding:1px 6px;font-weight:700;white-
 # Highlighted probable-start-date pill (amber = "when", distinct from the green score).
 _DATE = ("display:inline-block;background:#fff3cd;color:#7a5b00;border:1px solid #ffe69c;"
          "border-radius:6px;padding:1px 8px;font-size:14px;font-weight:700;white-space:nowrap")
+# Green "upgrade" tag marking a queue-worthy option (vs the muted "available" scouting rows).
+_TAG_UP = ("display:inline-block;background:#e8f5e9;color:#2e7d32;border:1px solid #c8e6c9;"
+           "border-radius:6px;padding:1px 7px;font-size:12px;font-weight:700")
 
 
 def _moves_lines(item) -> list[str]:
@@ -96,21 +99,26 @@ def _text(team_name, queue, plan, streams, hitters, when, budget, held_back) -> 
         out += [f"! Could not fill: {', '.join(plan.empty_slots)} (no one available today).",
                 ""]
 
-    out += ["--- STREAMING OPTIONS ---"]
+    out += ["--- STREAMING OPTIONS (available landscape) ---"]
     if streams:
         for s in streams:
             e = s.evaluation
             head = f"* {e.player.name} ({e.player.pro_team})"
+            if s.is_upgrade:
+                head += " [UPGRADE]"
             if e.start_label:
                 head += f" - STARTS {e.start_label}"
-            out += [head,
-                    f"    score {e.score:.0f}, {e.summary}",
-                    f"    drop {_drop_text(s)}, gain +{s.value_gain:.1f}"]
+            out += [head, f"    score {e.score:.0f}, {e.summary}"]
+            staff = f"vs staff {s.staff_gain:+.1f}" if s.staff_gain is not None else "vs staff -"
+            if s.drop is not None:
+                out.append(f"    {staff}, vs slot {s.slot_gain:+.1f}, drop {_drop_text(s)}")
+            else:
+                out.append(f"    {staff}, no open drop this run")
         note = _planahead_note(streams)
         if note:
             out.append(f"  ({note})")
     else:
-        out.append("(none worth streaming right now)")
+        out.append("(no available starters have an upcoming start)")
     out.append("")
 
     out += [f"--- BEST HITTER UPGRADE{'S' if len(hitters) != 1 else ''} ---"]
@@ -176,7 +184,7 @@ def _html(team_name, queue, plan, streams, hitters, when, budget, held_back) -> 
         h.append(f'<div style="color:#b00;font-size:15px;margin:8px 0">⚠ Could not fill: '
                  f'{escape(", ".join(plan.empty_slots))} (no one available today).</div>')
 
-    h.append(f'<div style="{_H2}">Streaming options</div>')
+    h.append(f'<div style="{_H2}">Streaming options (landscape)</div>')
     if streams:
         for s in streams:
             e = s.evaluation
@@ -188,19 +196,28 @@ def _html(team_name, queue, plan, streams, hitters, when, budget, held_back) -> 
                 links = f'<div style="{_MUTED};margin-top:4px">{joined}</div>'
             date_pill = (f' <span style="{_DATE}">▶ {escape(e.start_label)}</span>'
                          if e.start_label else "")
+            tag = (f' <span style="{_TAG_UP}">upgrade</span>' if s.is_upgrade
+                   else f' <span style="{_MUTED}">· available</span>')
+            score_color = "#2e7d32" if s.is_upgrade else "#888"
+            staff_txt = f"{s.staff_gain:+.1f}" if s.staff_gain is not None else "-"
+            if s.drop is not None:
+                move = (f'vs staff <b>{staff_txt}</b> · vs slot <b>{s.slot_gain:+.1f}</b> '
+                        f'· drop {escape(_drop_text(s))}')
+            else:
+                move = (f'vs staff <b>{staff_txt}</b> · '
+                        f'<span style="{_MUTED}">no open drop this run</span>')
             h.append(
                 f'<div style="{_CARD}">'
                 f'<b>{escape(e.player.name)}</b> '
                 f'<span style="{_MUTED}">({escape(e.player.pro_team)})</span> '
-                f'&nbsp;<b style="color:#2e7d32">{e.score:.0f}</b>{date_pill}'
+                f'&nbsp;<b style="color:{score_color}">{e.score:.0f}</b>{date_pill}{tag}'
                 f'<div style="{_MUTED};margin-top:2px">{escape(e.summary)}</div>'
-                f'<div style="margin-top:2px">drop {escape(_drop_text(s))} · '
-                f'gain <b>+{s.value_gain:.1f}</b></div>{links}</div>')
+                f'<div style="margin-top:2px">{move}</div>{links}</div>')
         note = _planahead_note(streams)
         if note:
             h.append(f'<div style="{_MUTED};margin:6px 0">{escape(note)}</div>')
     else:
-        h.append(f'<div style="{_MUTED}">None worth streaming right now.</div>')
+        h.append(f'<div style="{_MUTED}">No available starters have an upcoming start.</div>')
 
     h.append(f'<div style="{_H2}">Best hitter upgrade{"s" if len(hitters) != 1 else ""}</div>')
     if hitters:

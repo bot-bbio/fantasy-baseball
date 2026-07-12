@@ -69,7 +69,7 @@ def test_recommend_streamers_ranks_and_pairs_drop():
     assert len(recs) == 1
     assert recs[0].evaluation.player.player_id == 100   # only one with a probable start
     assert recs[0].drop.player_id == 1
-    assert recs[0].value_gain > 0
+    assert recs[0].slot_gain > 0
 
 
 def test_recommend_protects_core_arm_via_streamer_slot():
@@ -174,8 +174,12 @@ def test_drafted_pitcher_is_never_a_streamer_drop():
                            stats={"ERA": 3.0, "WHIP": 1.05, "K": 200, "OUTS": 540})]
 
     recs = streaming.recommend_streamers([drafted], free_agents, [day], offense)
-    # No disposable arm exists, so nothing is recommended (no churning the drafted keeper).
-    assert recs == []
+    # The available arm is still shown (landscape), but with no disposable arm to drop it is
+    # not an executable upgrade -- so the drafted keeper is never proposed as a churn.
+    assert len(recs) == 1
+    assert recs[0].drop is None
+    assert recs[0].is_upgrade is False
+    assert recs[0].staff_gain is not None       # staff-value metric still reported (no drop needed)
 
 
 def test_parse_team_ops_handles_payload():
@@ -284,3 +288,65 @@ def test_recommend_marks_today_start():
 
 def test_recommend_empty_schedule_returns_nothing():
     assert streaming.recommend_streamers([], [], [], {}) == []
+
+
+def test_landscape_shows_non_upgrades_not_just_upgrades():
+    """A fringe available starter is surfaced for scouting even when it can't beat the arm
+    you'd drop -- flagged is_upgrade=False so it is never proposed as a move."""
+    day = _one_game_day(ace_name="Fringe Starter")  # NYY probable is the fringe FA
+    offense = {136: 0.620, 147: 0.760}
+    strong = pitcher(1, "Strong Keeper Arm", team="Atl", slots=("SP", "P"),
+                     stats={"ERA": 2.8, "WHIP": 1.00, "K": 220, "OUTS": 560})   # droppable, strong
+    fringe = pitcher(100, "Fringe Starter", team="NYY", slots=("SP", "P"),
+                     stats={"ERA": 4.9, "WHIP": 1.48, "K": 105, "OUTS": 470})
+
+    recs = streaming.recommend_streamers([strong], [fringe], [day], offense)
+
+    assert len(recs) == 1                         # shown despite not being an upgrade
+    assert recs[0].slot_gain < 0
+    assert recs[0].is_upgrade is False
+
+
+def test_reports_both_slot_and_staff_gains():
+    """Each option carries two gains: vs the arm you'd drop (slot) and vs your rotation's
+    median skill (staff)."""
+    day = _one_game_day()                         # NYY home vs Mariners (0.620 OPS)
+    offense = {136: 0.620, 147: 0.760}
+    weak1 = pitcher(1, "Weak One", team="Atl", slots=("SP", "P"),
+                    stats={"ERA": 5.4, "WHIP": 1.52, "K": 90, "OUTS": 440})
+    weak2 = pitcher(2, "Weak Two", team="Mia", slots=("SP", "P"),
+                    stats={"ERA": 5.0, "WHIP": 1.45, "K": 100, "OUTS": 450})
+    ace = pitcher(100, "Stream Ace", team="NYY", slots=("SP", "P"),
+                  stats={"ERA": 3.0, "WHIP": 1.05, "K": 200, "OUTS": 540})
+
+    recs = streaming.recommend_streamers([weak1, weak2], [ace], [day], offense)
+
+    assert recs[0].slot_gain > 0                   # beats the specific arm it would drop
+    assert recs[0].staff_gain is not None
+    assert recs[0].staff_gain > 0                  # and clears the weak rotation's median skill
+
+
+def test_landscape_shows_options_beyond_droppable_count():
+    """More available starts than disposable arms: the extras still appear (drop=None),
+    ranked in, as scouting context rather than executable moves."""
+    offense = {147: 0.760, 136: 0.620, 111: 0.700, 110: 0.720}
+    two_probables = DaySchedule(
+        date="2026-07-05", playing_team_ids={147, 136, 111, 110},
+        probable_pitchers={147: "Ace One", 111: "Ace Two"},
+        opponents={147: 136, 136: 147, 111: 110, 110: 111},
+        home_teams={147, 111},
+        team_names={147: "Yankees", 136: "Mariners", 111: "Red Sox", 110: "Orioles"},
+    )
+    ace1 = pitcher(100, "Ace One", team="NYY", slots=("SP", "P"),
+                   stats={"ERA": 3.0, "WHIP": 1.05, "K": 205, "OUTS": 540})
+    ace2 = pitcher(101, "Ace Two", team="Bos", slots=("SP", "P"),
+                   stats={"ERA": 3.1, "WHIP": 1.08, "K": 195, "OUTS": 530})
+    weak = pitcher(1, "Weak SP", team="Atl", slots=("SP", "P"),
+                   stats={"ERA": 5.6, "WHIP": 1.55, "K": 70, "OUTS": 430})   # only droppable arm
+
+    recs = streaming.recommend_streamers([weak], [ace1, ace2], [two_probables], offense)
+
+    assert len(recs) == 2                         # both available starts are surfaced
+    assert recs[0].drop is not None               # the top option gets the lone disposable arm
+    assert recs[1].drop is None                   # the second has no distinct drop...
+    assert recs[1].is_upgrade is False            # ...so it is scouting-only, never queued

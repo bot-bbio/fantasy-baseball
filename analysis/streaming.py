@@ -174,6 +174,14 @@ def _skill_baseline(player: RosterPlayer, research, k_weight: float = 1.0) -> fl
     return statistics.fmean(parts) if parts else 50.0
 
 
+def _staff_baseline(roster: list[RosterPlayer], research, k_weight: float = 1.0) -> float | None:
+    """Median season/form skill of the manager's rostered starters -- the 'typical arm' a
+    pickup is measured against for the staff-value metric. Median (not mean) so one ace or
+    one scrub doesn't swing the yardstick. None if the roster has no starters."""
+    skills = [_skill_baseline(p, research, k_weight) for p in roster if _is_starter(p)]
+    return statistics.median(skills) if skills else None
+
+
 def _days_out(start_iso: str, today_iso: str | None) -> int | None:
     """Whole days from ``today_iso`` to the probable-start date; None if either is unparseable."""
     if not today_iso:
@@ -270,8 +278,10 @@ def evaluate(
 class StreamerRecommendation:
     evaluation: StreamerEvaluation
     drop: RosterPlayer | None
-    value_gain: float
+    slot_gain: float                # score minus the disposable arm you'd swap for it (actionable)
     drop_is_streamer: bool = False  # True if the drop recycles a tracked streamer slot
+    is_upgrade: bool = False        # True if a genuine upgrade (queue-worthy); else scouting-only
+    staff_gain: float | None = None  # score minus your rotation's median skill (staff-value context)
 
 
 def _first_start_day(player: RosterPlayer, schedules: list[DaySchedule]) -> DaySchedule | None:
@@ -311,9 +321,19 @@ def recommend_streamers(
     streamer_ids: frozenset[int] = frozenset(),
     min_relievers: int = MIN_RELIEVERS,
     max_streamer_age_days: int = STREAMER_MAX_AGE_DAYS,
-    limit: int = 6,
+    limit: int = 8,
 ) -> list[StreamerRecommendation]:
-    """Rank free-agent starters and pair each with the safest drop.
+    """Rank the *landscape* of available free-agent starts, pairing upgrades with a drop.
+
+    This surfaces the top ``limit`` free-agent starters with an upcoming start ranked by
+    score -- the available options -- not only the ones that beat your roster. Each is
+    tagged ``is_upgrade`` when its score clears the arm you'd drop, and only those upgrades
+    are queued for approval; the rest are scouting context (see what's out there).
+
+    Two gains are reported per option: ``slot_gain`` (score minus the specific disposable arm
+    you'd swap for it -- the actionable swap value) and ``staff_gain`` (score minus your
+    rotation's median skill -- a fixed staff-value yardstick that's comparable across rows and
+    doesn't depend on which arm happens to be droppable).
 
     The drop is always a *disposable* arm, identified two ways: pitchers explicitly tracked
     in ``streamer_ids`` (the manual streamer log), and -- automatically -- any arm acquired
@@ -389,25 +409,34 @@ def recommend_streamers(
     fresh = sorted((p for p in candidates if p.player_id not in streamer_ids), key=by_skill)
     droppable = recyclable + fresh
 
-    # Pair the best streamers with the weakest disposable arms: stream[i] takes droppable[i].
-    # Both lists are sorted (streamers by score desc, drops by skill asc), so the gain only
-    # falls as we go -- once the best remaining streamer can't beat the weakest remaining
-    # drop, nothing further can, and we stop. With a full roster every add needs a drop, so
-    # we never surface an unexecutable "add with no drop": running out of disposable arms
-    # ends the list (the report then reads "nothing worth streaming").
+    # Surface the LANDSCAPE of available starts, ranked by score -- not just clear upgrades.
+    # Each option is paired with a distinct disposable arm (stream[i] takes droppable[i]) so
+    # any genuine upgrade is directly executable; once the disposable arms run out, further
+    # options are still shown (drop=None) as scouting context. ``is_upgrade`` marks the ones
+    # worth acting on -- score beats the arm you'd drop -- and only those are ever queued.
+    # Both lists are sorted (streamers by score desc, drops by skill asc), so gain falls
+    # monotonically across the distinct-drop prefix and the upgrades form its head.
+    staff_baseline = _staff_baseline(roster, research, k_weight)
     recommendations: list[StreamerRecommendation] = []
     for index, evaluation in enumerate(evaluations):
-        if len(recommendations) >= limit or index >= len(droppable):
+        if len(recommendations) >= limit:
             break
-        drop = droppable[index]
-        gain = evaluation.score - _skill_baseline(drop, research, k_weight)
-        if gain <= 0:
-            break
-        drop_is_streamer = (
+        if index < len(droppable):
+            drop = droppable[index]
+            slot_gain = evaluation.score - _skill_baseline(drop, research, k_weight)
+        else:
+            # No disposable arm left to pair: still show the option (scouting) with its
+            # staff-value gain, but there's no executable swap so slot_gain is not shown.
+            drop = None
+            slot_gain = 0.0
+        staff_gain = (evaluation.score - staff_baseline) if staff_baseline is not None else None
+        is_upgrade = slot_gain > 0 and drop is not None
+        drop_is_streamer = drop is not None and (
             drop.player_id in streamer_ids
             or _is_recent_add(drop, today_date, max_streamer_age_days)
         )
         recommendations.append(
-            StreamerRecommendation(evaluation, drop, gain, drop_is_streamer)
+            StreamerRecommendation(evaluation, drop, slot_gain, drop_is_streamer,
+                                   is_upgrade, staff_gain)
         )
     return recommendations
